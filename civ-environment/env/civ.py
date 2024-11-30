@@ -152,12 +152,13 @@ class Civilization(AECEnv):
         # TODO: Implement returning the observation, termination, and reward etc. etc. bullshit
     
     class Unit:
-        def __init__(self, x, y, unit_type, owner):
+        def __init__(self, x, y, unit_type, owner, env):
             self.x = x
             self.y = y
             self.type = unit_type
             self.health = 100
             self.owner = owner
+            self.env = env
 
         def move(self, direction):
             if self._calculate_new_position(self.x, self.y, direction) is not None:
@@ -207,8 +208,8 @@ class Civilization(AECEnv):
             new_y = y + delta_y
 
             # Check if new position is within map boundaries
-            if not (0 <= new_x < self.map_width and 0 <= new_y < self.map_height):
-                return None 
+            if not (0 <= new_x < self.env.map_width and 0 <= new_y < self.env.map_height):
+                return None  
 
             # Check if the tile is empty of units and cities
             if self._is_tile_empty_of_units_and_cities(new_x, new_y):
@@ -227,11 +228,11 @@ class Civilization(AECEnv):
                 bool: True if the tile is empty of units and cities; False otherwise.
             """
             # Check all unit channels for all agents
-            for agent_idx in range(self.num_agents):
-                unit_base_idx = self.num_agents + (3 * agent_idx)
+            for agent_idx in range(self.env.num_of_agents):
+                unit_base_idx = self.env.num_of_agents + (3 * agent_idx)
                 # Channels for 'city', 'warrior', 'settler'
                 unit_channels = [unit_base_idx + i for i in range(3)]
-                if np.any(self.map[y, x, unit_channels] > 0):
+                if np.any(self.env.map[y, x, unit_channels] > 0):
                     return False  # Tile has a unit or city
             return True 
 
@@ -267,7 +268,7 @@ class Civilization(AECEnv):
     def _update_map_with_new_city(self, agent, city):
         x, y = city.x, city.y
         # Update the map to reflect the new city
-        city_channel = self.num_agents + (3 * self.agents.index(agent))  # Index for 'city' unit type
+        city_channel = self.num_of_agents + (3 * self.agents.index(agent))  # Index for 'city' unit type
         self.map[y, x, city_channel] = 1
         # Update visibility and ownership if necessary
         self._update_visibility(agent, x, y)
@@ -292,8 +293,8 @@ class Civilization(AECEnv):
         """
         Calculate the number of channels needed for the map representation, which changes dynamically based on number of players.
         """
-        ownership_channels = self.num_agents  # One channel per agent for ownership
-        units_channels = 3 * self.num_agents  # Cities, Warriors, Settlers per player
+        ownership_channels = self.num_of_agents  # One channel per agent for ownership
+        units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
         resources_channels = 3  # Resources, Materials, Water
         return ownership_channels + units_channels + resources_channels
 
@@ -349,7 +350,7 @@ class Civilization(AECEnv):
         Randomly place resources, materials, and water on the map.
         """
         num_resources = int(bountifulness * self.map_height * self.map_width)
-        resource_channels_start = self.num_agents + 3 * self.num_agents  # Starting index for resource channels, since this much will be occupied by borders and units
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents  # Starting index for resource channels, since this much will be occupied by borders and units
 
         # Channels for resources
         resources_channel = resource_channels_start  # Index for energy resources
@@ -388,7 +389,7 @@ class Civilization(AECEnv):
         Place spawn points for settlers and starting units (e.g., warriors) for each player.
         """
         spawn_points = []
-        for agent_idx in range(self.num_agents):
+        for agent_idx in range(self.num_of_agents):
             while True:
                 x = np.random.randint(0, self.map_width)
                 y = np.random.randint(0, self.map_height)
@@ -430,8 +431,11 @@ class Civilization(AECEnv):
         unit_types = {'city': 0, 'warrior': 1, 'settler': 2}
         if unit_type not in unit_types:
             raise ValueError(f"Invalid unit type: {unit_type}") #no typos!
-        unit_channel = self.num_agents + (3 * agent_idx) + unit_types[unit_type]
+        unit_channel = self.num_of_agents + (3 * agent_idx) + unit_types[unit_type]
         self.map[y, x, unit_channel] = 1
+        # Create a Unit instance and add it to the agent's unit list
+        unit = self.Unit(x, y, unit_type, self.agents[agent_idx], self)
+        self.units[self.agents[agent_idx]].append(unit)
         self._update_visibility(self.agents[agent_idx], x, y)
     
     def _get_adjacent_tiles(self, x, y):
@@ -495,6 +499,8 @@ class Civilization(AECEnv):
 
             for y, x in visible_tiles:
                 self.screen.blit(shade_surface, (x * self.cell_size, y * self.cell_size))
+            #print(f"Agent {agent_idx} can see {len(visible_tiles)} tiles.") # Debugging
+            #print(visible_tiles) # Debugging
 
         
     def _draw_grid(self):
@@ -527,14 +533,14 @@ class Civilization(AECEnv):
         # Draw ownership (background color of tiles)
         for y in range(self.map_height):
             for x in range(self.map_width):
-                for agent_idx in range(self.num_agents):
+                for agent_idx in range(self.num_of_agents):
                     if self.map[y, x, agent_idx] == 1:
                         color = agent_colors[agent_idx % len(agent_colors)]
                         rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                         pygame.draw.rect(self.screen, color, rect)
                         break  # Only one player can own a tile
         # Draw resources
-        resource_channels_start = self.num_agents + 3 * self.num_agents
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
         resources_channel = resource_channels_start
         materials_channel = resource_channels_start + 1
         water_channel = resource_channels_start + 2
@@ -548,8 +554,8 @@ class Civilization(AECEnv):
                 if self.map[y, x, water_channel] == 1:
                     self._draw_circle(x, y, resource_colors['water'])
         # Draw units
-        for agent_idx in range(self.num_agents):
-            unit_base_idx = self.num_agents + (3 * agent_idx)
+        for agent_idx in range(self.num_of_agents):
+            unit_base_idx = self.num_of_agents + (3 * agent_idx)
             city_channel = unit_base_idx + 0    # 'city'
             warrior_channel = unit_base_idx + 1  # 'warrior'
             settler_channel = unit_base_idx + 2  # 'settler'
@@ -633,9 +639,20 @@ class Civilization(AECEnv):
         Reset the environment.
         """
         self.agents = self.possible_agents[:]
+        self.units = {agent: [] for agent in self.agents}
+        self.cities = {agent: [] for agent in self.agents}
         self.agent_selector = agent_selector(self.agents)
         self.current_agent = self.agent_selector.next()
+        
         self._initialize_map()
+        # Reset visibility maps
+        self.visibility_maps = {agent: np.zeros((self.map_height, self.map_width), dtype=bool) for agent in self.agents}
+        for agent in self.agents:
+            for unit in self.units[agent]:
+                self._update_visibility(agent, unit.x, unit.y)
+            for city in self.cities[agent]:
+                self._update_visibility(agent, city.x, city.y)
+
         # Reset rewards, done, and info
         return #Observation of the current agent
 
