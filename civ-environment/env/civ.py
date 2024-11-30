@@ -10,7 +10,7 @@ import math
 
 class Civilization(AECEnv): 
     metadata = {'render.modes': ['human'], 'name': 'Civilization_v0'}
-    def __init__(self, map_size, num_agents, max_cities=10, visibility_range=1, *args, **kwargs):
+    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, *args, **kwargs):
         """
         Initialize the Civilization game.
         Args:
@@ -36,12 +36,16 @@ class Civilization(AECEnv):
         self.agent_selector = agent_selector(self.agents)
         self.current_agent = self.agent_selector.reset()
         self.num_of_agents = num_agents
+        self.max_units_per_agent = max_units_per_agent
+        self.max_projects = max_projects
+
 
         self.map_size = map_size
         self.map_height, self.map_width = map_size
 
         self.max_cities = max_cities
         # Initialize the observation spaces for each player
+        self.visibility_maps = {agent: np.zeros((self.map_height, self.map_width), dtype=bool) for agent in self.agents}
         self.observation_spaces = {
             agent: spaces.Dict({
                 "map": spaces.Box(
@@ -52,6 +56,12 @@ class Civilization(AECEnv):
                         self.map_width, 
                         self._calculate_num_channels()
                     ), 
+                    dtype=np.float32
+                ),
+                "units": spaces.Box(
+                    low=0,
+                    high=np.inf,
+                    shape=(self.max_units_per_agent, self._calculate_unit_attributes()),
                     dtype=np.float32
                 ),
                 "cities": spaces.Box(
@@ -66,14 +76,32 @@ class Civilization(AECEnv):
             })
             for agent in self.agents
         }
+        # Hold the units for each player
+        self.units = {agent: [] for agent in self.agents}
+        # Hold the cities for each player
+        self.cities = {agent: [] for agent in self.agents}
+
+        # Action constants: 
+        self.MOVE_UNIT = 0
+        self.ATTACK_UNIT = 1
+        self.FOUND_CITY = 2
+        self.ASSIGN_PROJECT = 3
+        self.NO_OP = 4
+
+        # unit types
+
+        self.UNIT_TYPE_MAPPING = { 'warrior': 0, 'settler' : 1 }
         # Initialize the action spaces for each player
         self.action_spaces = {
-            agent: spaces.Discrete(10)  # Will change, placeholder for now
+            agent: spaces.Dict({
+                "action_type": spaces.Discrete(6),  # 
+                "direction": spaces.Discrete(4),    # If action_type is Move_unit
+            })
             for agent in self.agents
-        }
+            }
        
         self.visibility_range = visibility_range
-        self._initialize_map
+        self._initialize_map()
 
         # Initialize Pygame:
         pygame.init()
@@ -85,6 +113,180 @@ class Civilization(AECEnv):
         self.clock = pygame.time.Clock()
         #This can definitebly be improved, but for now it's just a placeholder.
         #This is straught from the internet, needs to be changed
+    
+    def observe(self, agent):
+        full_map = self.map.copy()
+        visibility_map = self.visibility_maps[agent]
+        
+        # Mask unexplored areas
+        masked_map = np.where(
+            visibility_map[:, :, np.newaxis], # idk if this is the correct way of doing this...
+            full_map,
+            np.zeros_like(full_map)  # Fill unexplored areas with zeros. Maybe change this to a different value? 
+        )
+        
+        units_obs = np.zeros((self.max_units_per_agent, self._calculate_unit_attributes()), dtype=np.float32)
+        for idx, unit in enumerate(self.units[agent]):
+            units_obs[idx] = [unit.x, unit.y, unit.health, self.UNIT_TYPE_MAPPING[unit.type]]
+
+        # Return the observation dictionary
+        observation = {
+            "map": masked_map,
+            "cities": self._get_agent_cities(agent)
+        }
+        return observation
+
+    def step(self, action):
+        agent = self.current_agent
+        action_type = action['action_type']
+        if action_type == self.MOVE_UNIT:
+            self._handle_move_unit(agent, action)
+        elif action_type == self.ATTACK_UNIT:
+            self._handle_attack_unit(agent, action)
+        elif action_type == self.FOUND_CITY:
+            self._handle_found_city(agent, action)
+        elif action_type == self.ASSIGN_PROJECT:
+            self._handle_assign_project(agent, action)
+        elif action_type == self.NO_OP:
+            pass
+        # TODO: Implement returning the observation, termination, and reward etc. etc. bullshit
+    
+    class Unit:
+        def __init__(self, x, y, unit_type, owner):
+            self.x = x
+            self.y = y
+            self.type = unit_type
+            self.health = 100
+            self.owner = owner
+
+        def move(self, direction):
+            if self._calculate_new_position(self.x, self.y, direction) is not None:
+                new_x, new_y = self._calculate_new_position(self.x, self.y, direction)
+                self.x = new_x
+                self.y = new_y
+            else: 
+                # Handle invalid move
+                pass
+
+        def attack(self, direction):
+            if self.type == 'warrior':
+                # To be implemented
+                pass
+            return None
+
+        def defend(self):
+            if self.type == 'warrior':
+                # To be implemented
+                pass
+            return None
+        
+        def _calculate_new_position(self, x, y, direction):
+            """
+            Calculate the new position based on the direction and check if the tile is empty.
+            Args:
+                x (int): Current x-coordinate.
+                y (int): Current y-coordinate.
+                direction (int): Direction to move (0: up, 1: right, 2: down, 3: left).
+            Returns:
+                tuple or None: (new_x, new_y) if the move is valid; None if the move is invalid.
+            """
+            delta_x, delta_y = 0, 0
+            if direction == 0:  # up
+                delta_y = -1
+            elif direction == 1:  # right
+                delta_x = 1
+            elif direction == 2:  # down
+                delta_y = 1
+            elif direction == 3:  # left
+                delta_x = -1
+            else:
+                # direction must be [0,3] 
+                return None
+
+            new_x = x + delta_x
+            new_y = y + delta_y
+
+            # Check if new position is within map boundaries
+            if not (0 <= new_x < self.map_width and 0 <= new_y < self.map_height):
+                return None 
+
+            # Check if the tile is empty of units and cities
+            if self._is_tile_empty_of_units_and_cities(new_x, new_y):
+                return new_x, new_y
+            else:
+                return None  # Tile is occupied; cannot move there
+        
+        def _is_tile_empty_of_units_and_cities(self, x, y):
+            """
+            Check if the tile at (x, y) is empty of units and cities.
+
+            Args:
+                x (int): x-coordinate.
+                y (int): y-coordinate.
+            Returns:
+                bool: True if the tile is empty of units and cities; False otherwise.
+            """
+            # Check all unit channels for all agents
+            for agent_idx in range(self.num_agents):
+                unit_base_idx = self.num_agents + (3 * agent_idx)
+                # Channels for 'city', 'warrior', 'settler'
+                unit_channels = [unit_base_idx + i for i in range(3)]
+                if np.any(self.map[y, x, unit_channels] > 0):
+                    return False  # Tile has a unit or city
+            return True 
+
+        def found_city(self):
+            '''
+            Found a city at the current location.
+            Returns:
+                bool: True if the city can be founded (unit is a settler); False otherwise.
+            '''
+            # Only settlers can found cities
+            if self.type == 'settler':
+                return True
+            return None
+    
+    def _calculate_unit_attributes(self):
+        return 4 # Health, X location, Y location, Type
+
+    def _handle_found_city(self, agent, action):
+        unit_id = action['unit_id']
+        unit = self.units[agent][unit_id]
+        if unit.type == 'settler':
+            if unit.found_city():
+                new_city = self.City(unit.x, unit.y, agent)
+                self.cities[agent].append(new_city)
+                # Remove the settler from the game
+                self.units[agent].remove(unit)
+                # Update the map, visibility, and any other game state
+                self._update_map_with_new_city(agent, new_city)
+            else:
+                # Handle invalid action
+                pass
+    
+    def _update_map_with_new_city(self, agent, city):
+        x, y = city.x, city.y
+        # Update the map to reflect the new city
+        city_channel = self.num_agents + (3 * self.agents.index(agent))  # Index for 'city' unit type
+        self.map[y, x, city_channel] = 1
+        # Update visibility and ownership if necessary
+        self._update_visibility(agent, x, y)
+        self.map[y, x, self.agents.index(agent)] = 1  # Mark ownership of the tile
+
+    class City:
+        def __init__(self, x, y, owner):
+            self.x = x
+            self.y = y
+            self.health = 100
+            self.resources = self._get_resources()
+            self.finished_projects = [0 for i in range(self.max_projects)]
+            self.current_project = 0
+            self.project_duration = 0
+            self.owner = owner
+
+        def _get_resources(self):
+            # Implement scanning 2 tiles around the city (in a square) for resources and returning the types and amounts
+            pass
     
     def _calculate_num_channels(self):
         """
@@ -107,7 +309,7 @@ class Civilization(AECEnv):
             - Current Project
             - Project Duration
         """
-        num_projects = 5  # Placeholder, needs to change
+        num_projects = self.max_projects  # Placeholder, needs to change
         return 1 + 2 + 3 + num_projects + 1 + 1  # Health, Location (x, y), Resources(3, 1 for each type), Finished Projects, Current Project, Duration
 
     
@@ -129,6 +331,18 @@ class Civilization(AECEnv):
     
         # Place spawn settlers and warriors for each player
         self._place_starting_units()
+    
+    def _get_agent_cities(agent):
+        pass
+
+    def _update_visibility(self, agent, unit_x, unit_y):
+        visibility_range = self.visibility_range
+        x_min = max(0, unit_x - visibility_range)
+        x_max = min(self.map_width, unit_x + visibility_range + 1)
+        y_min = max(0, unit_y - visibility_range)
+        y_max = min(self.map_height, unit_y + visibility_range + 1)
+        
+        self.visibility_maps[agent][y_min:y_max, x_min:x_max] = True
     
     def _place_resources(self, bountifulness=0.15):
         """
@@ -194,7 +408,7 @@ class Civilization(AECEnv):
             if not warrior_placed:
                 # Handle the case where no adjacent empty tile is found
                 print(f"Warning: Could not place warrior for agent {agent_idx} adjacent to settler at ({x}, {y}).")
-                # Optionally, expand search radius
+               # Optionally, expand search radius
 
     
     def _is_tile_empty(self, x, y):
@@ -218,6 +432,7 @@ class Civilization(AECEnv):
             raise ValueError(f"Invalid unit type: {unit_type}") #no typos!
         unit_channel = self.num_agents + (3 * agent_idx) + unit_types[unit_type]
         self.map[y, x, unit_channel] = 1
+        self._update_visibility(self.agents[agent_idx], x, y)
     
     def _get_adjacent_tiles(self, x, y):
         """
@@ -251,8 +466,36 @@ class Civilization(AECEnv):
         self._draw_grid()
         self._draw_elements()
 
+        # Overlay visibility
+        self._draw_visibility()
+
         pygame.display.flip()
         self.clock.tick(60)  # Limit to 60 fps
+
+    def _draw_visibility(self):
+        """
+        Overlay a semi-transparent shade on tiles visible to each agent, visualizing fog of war.
+        """
+        agent_shades = [
+            (255, 0, 0, 50),    # Red with alpha 50
+            (0, 255, 0, 50),    # Green with alpha 50
+            (0, 0, 255, 50),    # Blue with alpha 50
+            (255, 255, 0, 50),  # Yellow with alpha 50
+            (255, 0, 255, 50),  # Magenta with alpha 50
+            (0, 255, 255, 50)   # Cyan with alpha 50
+        ]
+
+        for agent_idx, agent in enumerate(self.agents):
+            shade_color = agent_shades[agent_idx]
+            shade_surface = pygame.Surface((self.cell_size, self.cell_size), pygame.SRCALPHA)
+            shade_surface.fill(shade_color)
+
+            visibility_map = self.visibility_maps[agent]
+            visible_tiles = np.argwhere(visibility_map)
+
+            for y, x in visible_tiles:
+                self.screen.blit(shade_surface, (x * self.cell_size, y * self.cell_size))
+
         
     def _draw_grid(self):
         """
@@ -384,7 +627,7 @@ class Civilization(AECEnv):
             py = center_y + r * math.sin(angle)
             points.append((px, py))
         pygame.draw.polygon(self.screen, color, points)
-    # polygon code from the internet
+        
     def reset(self):
         """
         Reset the environment.
@@ -399,8 +642,8 @@ class Civilization(AECEnv):
 
 # Testing 
 if __name__ == "__main__":
-    map_size = (10, 10) 
-    num_agents = 2        
+    map_size = (15, 30) 
+    num_agents = 4        
     env = Civilization(map_size, num_agents)
     env.reset()
     running = True
@@ -409,4 +652,4 @@ if __name__ == "__main__":
         for event in pygame.event.get():
             if event.type == QUIT:
                 running = False
-    pygame.quit()
+    pygame.quit()   
