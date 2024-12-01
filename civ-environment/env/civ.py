@@ -8,6 +8,17 @@ import pygame
 from pygame.locals import QUIT
 import math
 
+# TODO: Make sure invalid actions are handled gracefully
+# Example action: 
+# action = {
+#    "action_type": self.MOVE_UNIT,
+#    "unit_id": 0,
+#    "direction": 1,  # 0: up, 1: right, 2: down, 3: left
+#    "city_id": 0,    # Ignored for MOVE_UNIT
+#    "project_id": 0  # Ignored for MOVE_UNIT
+#}
+# Might change!
+
 class Civilization(AECEnv): 
     metadata = {'render.modes': ['human'], 'name': 'Civilization_v0'}
     def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, *args, **kwargs):
@@ -81,6 +92,9 @@ class Civilization(AECEnv):
         # Hold the cities for each player
         self.cities = {agent: [] for agent in self.agents}
 
+        self.last_attacker = None
+        self.last_target_destroyed = False
+
         # Action constants: 
         self.MOVE_UNIT = 0
         self.ATTACK_UNIT = 1
@@ -94,11 +108,14 @@ class Civilization(AECEnv):
         # Initialize the action spaces for each player
         self.action_spaces = {
             agent: spaces.Dict({
-                "action_type": spaces.Discrete(6),  # 
-                "direction": spaces.Discrete(4),    # If action_type is Move_unit
+                "action_type": spaces.Discrete(5),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP
+                "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
+                "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
+                "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
+                "project_id": spaces.Discrete(self.max_projects)       # For ASSIGN_PROJECT
             })
             for agent in self.agents
-            }
+        }
        
         self.visibility_range = visibility_range
         self._initialize_map()
@@ -127,30 +144,107 @@ class Civilization(AECEnv):
         
         units_obs = np.zeros((self.max_units_per_agent, self._calculate_unit_attributes()), dtype=np.float32)
         for idx, unit in enumerate(self.units[agent]):
-            units_obs[idx] = [unit.x, unit.y, unit.health, self.UNIT_TYPE_MAPPING[unit.type]]
+            if idx < self.max_units_per_agent:
+                units_obs[idx] = [unit.x, unit.y, unit.health, self.UNIT_TYPE_MAPPING[unit.type]]
+        
+        cities_obs = self._get_agent_cities(agent)
 
         # Return the observation dictionary
         observation = {
             "map": masked_map,
-            "cities": self._get_agent_cities(agent)
+            "units": units_obs,
+            "cities": cities_obs
         }
         return observation
 
     def step(self, action):
         agent = self.current_agent
         action_type = action['action_type']
+        
         if action_type == self.MOVE_UNIT:
-            self._handle_move_unit(agent, action)
+            unit_id = action['unit_id']
+            direction = action['direction']
+            self._handle_move_unit(agent, unit_id, direction)
+        
         elif action_type == self.ATTACK_UNIT:
-            self._handle_attack_unit(agent, action)
+            unit_id = action['unit_id']
+            direction = action['direction']
+            self._handle_attack_unit(agent, unit_id, direction)
+        
         elif action_type == self.FOUND_CITY:
-            self._handle_found_city(agent, action)
+            unit_id = action['unit_id']
+            self._handle_found_city(agent, unit_id)
+        
         elif action_type == self.ASSIGN_PROJECT:
-            self._handle_assign_project(agent, action)
+            city_id = action['city_id']
+            project_id = action['project_id']
+            self._handle_assign_project(agent, city_id, project_id)
+        
         elif action_type == self.NO_OP:
-            pass
+            pass  # Do nothing
         # TODO: Implement returning the observation, termination, and reward etc. etc. bullshit
+        
+        # Initialize rewards
+        rewards = {agent: 0 for agent in self.agents}
+        # TODO: ASSIGN REWARDS, USING A REWARD FUNCTION
+
+        # Check for termination (e.g., only one player remains)
+        active_agents = [agent for agent in self.agents if self.units[agent] or self.cities[agent]] # We only leave agents that have either a city or a unit
+        done = len(active_agents) <= 1
+
+        # Prepare observations
+        observations = {agent: self.observe(agent) for agent in self.agents}
+        # TODO: RETURN OBSERVATIONS USING SELF.OBSERVE
+
+        # Prepare dones
+        dones = {agent: done for agent in self.agents}
+        dones['__all__'] = done
+
+        # Prepare infos
+        infos = {agent: {} for agent in self.agents}
+
+        # Advance to the next agent
+        self.current_agent = self.agent_selector.next()
+
     
+    def _handle_move_unit(self, agent, action):
+        unit_id = action['unit_id']
+        direction = action['direction']
+        unit = self.units[agent][unit_id]
+        unit.move(direction)
+        self._update_visibility(agent, unit.x, unit.y)
+    
+    def _handle_attack_unit(self, agent, action):
+        unit_id = action['unit_id']
+        direction = action['direction']
+        unit = self.units[agent][unit_id]
+        unit.attack(direction)
+        # TODO: UPDATE THE HEALTH OF THE UNIT ATTACKED
+        # Done within the Unit class now
+    
+
+    def _handle_found_city(self, agent, action):
+        unit_id = action['unit_id']
+        unit = self.units[agent][unit_id]
+        if unit.type == 'settler':
+            if unit.found_city():
+                new_city = self.City(unit.x, unit.y, agent, env=self)
+                self.cities[agent].append(new_city)
+                # Remove the settler from the game
+                self.units[agent].remove(unit)
+                # Update the map, visibility, and any other game state
+                self._update_map_with_new_city(agent, new_city)
+            else:
+                # Handle invalid action
+                pass
+
+    def _handle_assign_project(self, agent, action):
+        city_id = action['city_id']
+        project_id = action['project_id']
+        city = self.cities[agent][city_id]
+        city.current_project = project_id
+        city.project_duration = self._get_project_duration(project_id)
+
     class Unit:
         def __init__(self, x, y, unit_type, owner, env):
             self.x = x
@@ -161,8 +255,16 @@ class Civilization(AECEnv):
             self.env = env
 
         def move(self, direction):
-            if self._calculate_new_position(self.x, self.y, direction) is not None:
-                new_x, new_y = self._calculate_new_position(self.x, self.y, direction)
+            '''
+            Move in the specified directino. 
+
+            Args: 
+                direction (int): Direction to move (0: up, 1: right, 2: down, 3: left).
+            '''
+            new_pos = self._calculate_new_position(self.x, self.y, direction)
+            if new_pos is not None:
+                new_x, new_y = new_pos
+                self.env._update_unit_position_on_map(self, new_x, new_y)
                 self.x = new_x
                 self.y = new_y
             else: 
@@ -170,16 +272,35 @@ class Civilization(AECEnv):
                 pass
 
         def attack(self, direction):
-            if self.type == 'warrior':
-                # To be implemented
-                pass
-            return None
+            '''
+            Attack an enemy unit or city in the specified direction.
 
-        def defend(self):
-            if self.type == 'warrior':
-                # To be implemented
-                pass
-            return None
+            Args:
+                direction (int): Direction to attack (0: up, 1: right, 2: down, 3: left).
+            '''
+            if self.type != 'warrior':
+                print(f"Unit {self} is not a warrior and cannot attack.")
+                return
+
+            target_agent, target = self._check_enemy_units_and_cities(self.x, self.y, direction, self.owner)
+
+            if target is not None:
+                print(f"{self.owner}'s warrior at ({self.x}, {self.y}) attacks {target_agent}'s {target.type} at ({target.x}, {target.y}).")
+                # Inflict damage
+                target.health -= 35
+                print(f"Target's health is now {target.health}.")
+                self.env.last_attacker = self.owner
+                self.env.last_target_destroyed = False
+
+                # Check if the target is destroyed
+                if target.health <= 0:
+                    print(f"Target {target.type} at ({target.x}, {target.y}) has been destroyed.")
+                    self.env.last_target_destroyed = True
+                    self.env._remove_unit_or_city(target)
+            else:
+                print(f"No enemy to attack in direction {direction} from ({self.x}, {self.y}).")
+        
+        # TODO: Maybe add defending? 
         
         def _calculate_new_position(self, x, y, direction):
             """
@@ -235,36 +356,122 @@ class Civilization(AECEnv):
                 if np.any(self.env.map[y, x, unit_channels] > 0):
                     return False  # Tile has a unit or city
             return True 
+        
+        def _check_enemy_units_and_cities(self, x, y, direction, agent): 
+            """
+            Check if there are warriors or cities in the direction of the move. 
+            Args:
+                x (int): Current x coordinate.
+                y (int): Current y coordinate.
+                direction (int): Direction to move (0: up, 1: right, 2: down, 3: left).
+                agent (str): The agent doing the check (so it doesn't attack its own).
+            Returns:
+                The target unit's owner and itself.
+            """
+            delta_x, delta_y = 0, 0
+            if direction == 0:
+                delta_y = -1
+            elif direction == 1:
+                delta_x = 1
+            elif direction == 2:
+                delta_y = 1
+            elif direction == 3:
+                delta_x = -1
+            else:
+                return None, None
+
+            new_x = x + delta_x
+            new_y = y + delta_y
+
+             # Check map boundaries
+            if not (0 <= new_x < self.map_width and 0 <= new_y < self.map_height):
+                return None, None
+
+            target = self.env._get_target_at(new_x, new_y)
+
+            if target and target.owner != agent:
+                return target.owner, target
+
+            return None, None
 
         def found_city(self):
             '''
             Found a city at the current location.
             Returns:
-                bool: True if the city can be founded (unit is a settler); False otherwise.
+                bool: True if the city can be founded (unit is a settler, tile is empty); False otherwise.
             '''
             # Only settlers can found cities
             if self.type == 'settler':
                 return True
             return None
     
+    def _update_unit_position_on_map(self, unit, new_x, new_y):
+        """
+        Update the map to reflect the unit's movement.
+
+        Args:
+            unit (Unit): The unit that is moving.
+            new_x (int): The new x-coordinate.
+            new_y (int): The new y-coordinate.
+        """
+        # Determine the unit's channel
+        agent_idx = self.agents.index(unit.owner)
+        unit_types = {'warrior': 1, 'settler': 2} # Cities can't move
+        channel_offset = unit_types.get(unit.type)
+        unit_channel = self.num_of_agents + (3 * agent_idx) + channel_offset
+
+        # Clear the old position
+        self.map[unit.y, unit.x, unit_channel] = 0
+
+        # Set the new position
+        self.map[new_y, new_x, unit_channel] = 1
+
     def _calculate_unit_attributes(self):
         return 4 # Health, X location, Y location, Type
-
-    def _handle_found_city(self, agent, action):
-        unit_id = action['unit_id']
-        unit = self.units[agent][unit_id]
-        if unit.type == 'settler':
-            if unit.found_city():
-                new_city = self.City(unit.x, unit.y, agent)
-                self.cities[agent].append(new_city)
-                # Remove the settler from the game
-                self.units[agent].remove(unit)
-                # Update the map, visibility, and any other game state
-                self._update_map_with_new_city(agent, new_city)
-            else:
-                # Handle invalid action
-                pass
     
+    def _get_target_at(self, x, y):
+        """
+        Locate a unit or city at the specified coordinates.
+
+        Args:
+            x (int): x coordinate.
+            y (int): y coordinate.
+
+        Returns:
+            Unit or City object if found, or None.
+        """
+        # Check all agents' units
+        for agent in self.agents:
+            for unit in self.units[agent]:
+                if unit.x == x and unit.y == y:
+                    return unit
+            for city in self.cities[agent]:
+                if city.x == x and city.y == y:
+                    return city
+        return None
+
+    def _remove_unit_or_city(self, target):
+        """
+        Remove a unit or city from the environment.
+
+        Args:
+            target (Unit or City): The target to be removed.
+        """
+        owner = target.owner
+        if isinstance(target, self.Unit):
+            self.units[owner].remove(target)
+            # Determine the channel based on unit type
+            unit_types = {'warrior': 1, 'settler': 2} # To stay consistent with the representations defined before, where 0 = city
+            channel_offset = unit_types.get(target.type, None)
+            if channel_offset is not None:
+                channel = self.num_of_agents + (3 * self.agents.index(owner)) + channel_offset
+                self.map[target.y, target.x, channel] = 0
+        elif isinstance(target, self.City):
+            self.cities[owner].remove(target)
+            # Channel for cities is offset 0
+            channel = self.num_of_agents + (3 * self.agents.index(owner))
+            self.map[target.y, target.x, channel] = 0
+
     def _update_map_with_new_city(self, agent, city):
         x, y = city.x, city.y
         # Update the map to reflect the new city
@@ -275,19 +482,41 @@ class Civilization(AECEnv):
         self.map[y, x, self.agents.index(agent)] = 1  # Mark ownership of the tile
 
     class City:
-        def __init__(self, x, y, owner):
+        def __init__(self, x, y, owner, env):
             self.x = x
             self.y = y
             self.health = 100
             self.resources = self._get_resources()
-            self.finished_projects = [0 for i in range(self.max_projects)]
+            self.finished_projects = [0 for _ in range(self.max_projects)]
             self.current_project = 0
             self.project_duration = 0
             self.owner = owner
+            self.env = env
 
         def _get_resources(self):
-            # Implement scanning 2 tiles around the city (in a square) for resources and returning the types and amounts
-            pass
+            """
+            Initialize resources for the city by scanning surrounding tiles.
+            Returns a dictionary with resource types and their quantities.
+            """
+            resources = {'resource': 0, 'material': 1, 'water': 2}
+            scan_range = 2  # Scan 2 tiles around the city
+
+            for dx in range(-scan_range, scan_range + 1):
+                for dy in range(-scan_range, scan_range + 1):
+                    x, y = self.x + dx, self.y + dy
+                    if 0 <= x < self.env.map_width and 0 <= y < self.env.map_height:
+                        # Check resource channels
+                        resource_channels_start = self.env.num_of_agents + 3 * self.env.num_of_agents
+                        resources_channel = resource_channels_start
+                        materials_channel = resource_channels_start + 1
+                        water_channel = resource_channels_start + 2
+                        if self.env.map[y, x, resources_channel] > 0:
+                            resources['resource'] += 1
+                        if self.env.map[y, x, materials_channel] > 0:
+                            resources['material'] += 1
+                        if self.env.map[y, x, water_channel] > 0:
+                            resources['water'] += 1
+            return resources
     
     def _calculate_num_channels(self):
         """
@@ -332,9 +561,53 @@ class Civilization(AECEnv):
     
         # Place spawn settlers and warriors for each player
         self._place_starting_units()
+
+        # TODO: Implement more complex world generation and spawn point selection?
     
-    def _get_agent_cities(agent):
-        pass
+    def _get_agent_cities(self, agent):
+        """
+        Get the cities of the specified agent as a numpy array.
+        Args:
+            agent (str): The agent's name.
+
+        Returns:
+            np.ndarray: Array of shape (max_cities, num_city_attributes).
+        """
+        num_attributes = self._calculate_city_attributes()
+        cities_obs = np.zeros((self.max_cities, num_attributes), dtype=np.float32)
+        
+        for idx, city in enumerate(self.cities[agent]):
+            if idx >= self.max_cities:
+                break  # Limit to max_cities
+            
+            # Extract city attributes
+            city_data = [
+                city.health,     # Health
+                city.x,          # X coordinate
+                city.y,          # Y coordinate
+                city.resources.get('resource', 0),  # Resource
+                city.resources.get('material', 0),  # Material
+                city.resources.get('water', 0),      # Water
+            ]
+            
+            # Finished Projects (Assuming it's a list of binary indicators)
+            # If max_projects is 5, include only the first 5
+            finished_projects = city.finished_projects[:self.max_projects]
+            # Ensure that finished_projects has exactly max_projects elements
+            while len(finished_projects) < self.max_projects:
+                finished_projects.append(0)
+            city_data.extend(finished_projects)
+            
+            # Current Project
+            city_data.append(city.current_project)
+            
+            # Project Duration
+            city_data.append(city.project_duration)
+            
+            # Assign to the cities_obs array
+            cities_obs[idx] = city_data[:num_attributes]
+        
+        return cities_obs
 
     def _update_visibility(self, agent, unit_x, unit_y):
         visibility_range = self.visibility_range
@@ -653,8 +926,20 @@ class Civilization(AECEnv):
             for city in self.cities[agent]:
                 self._update_visibility(agent, city.x, city.y)
 
-        # Reset rewards, done, and info
-        return #Observation of the current agent
+        # Initialize tracking variables
+        self.last_attacker = None
+        self.last_target_destroyed = False
+        
+        # Prepare initial observations
+        observations = {agent: self.observe(agent) for agent in self.agents}
+        
+        # Initialize rewards, dones, and infos
+        rewards = {agent: 0 for agent in self.agents}
+        dones = {agent: False for agent in self.agents}
+        dones['__all__'] = False
+        infos = {agent: {} for agent in self.agents}
+        
+        return observations
 
 
 # Testing 
