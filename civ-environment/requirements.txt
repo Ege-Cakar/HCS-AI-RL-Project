@@ -2,3 +2,6 @@ numpy
 pettingzoo
 gymnasium
 pygame
+torch
+scipy
+jax
