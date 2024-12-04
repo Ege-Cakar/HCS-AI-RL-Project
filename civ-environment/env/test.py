@@ -61,7 +61,7 @@ def main():
         action_size = act_space['action_type'].n
 
         # Initialize actor and critic networks
-        actor_policies[agent] = ActorRNN(input_size, hidden_size, action_size)
+        actor_policies[agent] = ActorRNN(input_size, hidden_size, action_size, env.max_cities, env.max_projects)
         critic_policies[agent] = CriticRNN(input_size_critic, hidden_size)
 
         # Initialize policy parameters

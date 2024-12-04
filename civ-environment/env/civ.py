@@ -247,23 +247,16 @@ class Civilization(AECEnv):
         action_type = action['action_type']
         
         if action_type == self.MOVE_UNIT:
-            unit_id = action['unit_id']
-            direction = action['direction']
-            self._handle_move_unit(agent, unit_id, direction)
+            self._handle_move_unit(agent, action)
         
         elif action_type == self.ATTACK_UNIT:
-            unit_id = action['unit_id']
-            direction = action['direction']
-            self._handle_attack_unit(agent, unit_id, direction)
+            self._handle_attack_unit(agent, action)
         
         elif action_type == self.FOUND_CITY:
-            unit_id = action['unit_id']
-            self._handle_found_city(agent, unit_id)
+            self._handle_found_city(agent, action)
         
         elif action_type == self.ASSIGN_PROJECT:
-            city_id = action['city_id']
-            project_id = action['project_id']
-            self._handle_assign_project(agent, city_id, project_id)
+            self._handle_assign_project(agent, action)
         
         elif action_type == self.BUY_WARRIOR:
             city_id = action['city_id']
@@ -368,22 +361,25 @@ class Civilization(AECEnv):
                 # Update the map, visibility, and any other game state
                 self._update_map_with_new_city(agent, new_city)
             else:
-                # Handle invalid action
                 pass
 
     def _handle_assign_project(self, agent, action):
         city_id = action['city_id']
         project_id = action['project_id']
-        city = self.cities[agent][city_id]
-        if city.current_project is None:
-            project = self.projects.get(project_id, None)
-            if project is not None:
-                city.current_project = project_id
-                city.project_duration = project['duration']
+        if city_id in self.cities[agent]:
+            city = self.cities[agent][city_id]
+            if city.current_project is None:
+                project = self.projects.get(project_id, None)
+                if project is not None:
+                    city.current_project = project_id
+                    city.project_duration = project['duration']
+                else:
+                    raise ValueError(f"Invalid project ID: {project_id}")
             else:
-                raise ValueError(f"Invalid project ID: {project_id}")
-        else:
-            raise ValueError(f"City {city_id} is already working on a project.")
+                raise ValueError(f"City {city_id} is already working on a project.")
+        else: 
+            # Handle invalid city ID
+            pass
     
     def _handle_buy_warrior(self, agent, city_id):
         city = self.cities[agent][city_id]
@@ -444,7 +440,7 @@ class Civilization(AECEnv):
                 print(f"Unit {self} is not a warrior and cannot attack.")
                 return
 
-            target_agent, target = self._check_enemy_units_and_cities(self.x, self.y, direction, self.owner)
+            target_agent, target = self._check_enemy_units_and_cities(self.x, self.y, direction, self.owner, self.env)
 
             if target is not None:
                 print(f"{self.owner}'s warrior at ({self.x}, {self.y}) attacks {target_agent}'s {target.type} at ({target.x}, {target.y}).")
@@ -527,7 +523,7 @@ class Civilization(AECEnv):
                     return False  # Tile has a unit or city
             return True 
         
-        def _check_enemy_units_and_cities(self, x, y, direction, agent): 
+        def _check_enemy_units_and_cities(self, x, y, direction, agent, env): 
             """
             Check if there are warriors or cities in the direction of the move. 
             Args:
@@ -554,7 +550,7 @@ class Civilization(AECEnv):
             new_y = y + delta_y
 
              # Check map boundaries
-            if not (0 <= new_x < self.map_width and 0 <= new_y < self.map_height):
+            if not (0 <= new_x < env.map_width and 0 <= new_y < env.map_height):
                 return None, None
 
             target = self.env._get_target_at(new_x, new_y)

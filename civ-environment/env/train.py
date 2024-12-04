@@ -168,11 +168,33 @@ class ProximalPolicyOptimization:
                     
                     # Actor policy: get action distribution and next hidden state
                     action_probs, next_actor_hidden = actor_policy(obs_tensor, actor_hidden_states[agent])
-                    action_dist = Categorical(probs=action_probs)
-                    action = action_dist.sample().item()
+                    
+                    # Sample action components
+                    action_type_dist = Categorical(probs=action_probs['action_type'])
+                    action_type = action_type_dist.sample().item()
+
+                    unit_id_dist = Categorical(probs=action_probs['unit_id'])
+                    unit_id = unit_id_dist.sample().item()
+
+                    direction_dist = Categorical(probs=action_probs['direction'])
+                    direction = direction_dist.sample().item()
+
+                    city_id_dist = Categorical(probs=action_probs['city_id'])
+                    city_id = city_id_dist.sample().item()
+
+                    project_id_dist = Categorical(probs=action_probs['project_id'])
+                    project_id = project_id_dist.sample().item()
+
+                    action = {
+                        'action_type': action_type,
+                        'unit_id': unit_id,
+                        'direction': direction,
+                        'city_id': city_id,
+                        'project_id': project_id,
+                    }
                     actions[agent] = action
                     env.step(action)
-                    # env.agent_selection
+
                     next_actor_hidden_states[agent] = next_actor_hidden
 
                 
@@ -321,35 +343,43 @@ class ProximalPolicyOptimization:
     
 
 class ActorRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        """
-        Actor RNN that outputs action probabilities.
-
-        Args:
-            input_size: Size of the input observation.
-            hidden_size: Size of the RNN hidden state.
-            output_size: Number of actions (action space size).
-        """
+    def __init__(self, input_size, hidden_size, max_units_per_agent, max_cities, max_projects):
         super(ActorRNN, self).__init__()
         self.hidden_size = hidden_size
         self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
+        self.fc_action_type = nn.Linear(hidden_size, 7)
+        self.fc_unit_id = nn.Linear(hidden_size, max_units_per_agent)
+        self.fc_direction = nn.Linear(hidden_size, 4)
+        self.fc_city_id = nn.Linear(hidden_size, max_cities)
+        self.fc_project_id = nn.Linear(hidden_size, max_projects)
     
     def forward(self, observation, hidden_state):
-        """
-        Forward pass of the actor network.
-
-        Args:
-            observation: Input observation tensor of shape (batch_size, input_size).
-            hidden_state: Hidden state of the RNN of shape (1, batch_size, hidden_size).
-
-        Returns:
-            action_probs: Action probabilities of shape (batch_size, output_size).
-            hidden_state: Updated hidden state of the RNN of shape (1, batch_size, hidden_size).
-        """
         output, hidden_state = self.rnn(observation.unsqueeze(1), hidden_state)  # Add sequence dimension
-        logits = self.fc(output.squeeze(1))  # Remove sequence dimension
-        action_probs = F.softmax(logits, dim=-1)  # Convert to probabilities
+        output = output.squeeze(1)  # Remove sequence dimension
+
+        action_type_logits = self.fc_action_type(output)
+        action_type_probs = F.softmax(action_type_logits, dim=-1)
+
+        unit_id_logits = self.fc_unit_id(output)
+        unit_id_probs = F.softmax(unit_id_logits, dim=-1)
+
+        direction_logits = self.fc_direction(output)
+        direction_probs = F.softmax(direction_logits, dim=-1)
+
+        city_id_logits = self.fc_city_id(output)
+        city_id_probs = F.softmax(city_id_logits, dim=-1)
+
+        project_id_logits = self.fc_project_id(output)
+        project_id_probs = F.softmax(project_id_logits, dim=-1)
+
+        action_probs = {
+            'action_type': action_type_probs,
+            'unit_id': unit_id_probs,
+            'direction': direction_probs,
+            'city_id': city_id_probs,
+            'project_id': project_id_probs,
+        }
+
         return action_probs, hidden_state
     
 class CriticRNN(nn.Module):
