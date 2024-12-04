@@ -143,8 +143,8 @@ class ProximalPolicyOptimization:
             trajectory = []
             
             # Reset environment and get initial state, converted to usable format
-            state = ProximalPolicyOptimization.state_conversion(env.reset())
-            
+            env.reset()
+            state = env.observe()
             # Initialize hidden states for actor and critic networks
             actor_hidden_states = {agent: torch.zeros(1, actor_policies[agent].hidden_size) for agent in env.agents}
             critic_hidden_states = {agent: torch.zeros(1, critic_policies[agent].hidden_size) for agent in env.agents}
@@ -175,7 +175,9 @@ class ProximalPolicyOptimization:
                     next_critic_hidden_states[agent] = next_critic_hidden
 
                 # Step environment with all actions
-                next_obs, rewards, dones, _ = env.step(actions)
+                next_obs = env.observe(agent)
+                rewards = env.rewards(agent)
+                dones = env.dones(agent)
 
                 # Store the current step in the trajectory
                 for agent in env.agents:
@@ -195,7 +197,7 @@ class ProximalPolicyOptimization:
                 critic_hidden_states = next_critic_hidden_states
 
                 # Update state
-                state = ProximalPolicyOptimization.state_conversion(next_obs)
+                state = next_obs
                 
                 # Check if all agents are done
                 if all(dones.values()):
@@ -205,31 +207,6 @@ class ProximalPolicyOptimization:
 
         return trajectories
 
-    def state_conversion(state):
-        '''
-        Converts state to a usable dictionary
-
-        Input: state
-        Output: state dictionary indexed by attributes
-        '''
-
-        custom_keys = ['ongoing_projects', 'completed_projects', 'explored_tiles', 'captured_cities', 'lost_cities', 'enemy_units_eliminated', 'units_lost', 'GDP', 'energy_output', 'resources_controlled', 'environmental_impact']
-
-        state_dict = {key: None for key in custom_keys}
-
-        state_dict["ongoing_projects"] = 0
-        state_dict["completed_projects"]= 0
-        state_dict["explored_tiles"]=0
-        state_dict['captured_cities']=0
-        state_dict['lost_cities']=0
-        state_dict['enemy_units_eliminated']=0
-        state_dict['units_lost']=0
-        state_dict['GDP']=0
-        state_dict['energy_output']=0
-        state_dict['resources_controlled']=0
-        state_dict['environmental_impact']=0
-
-        return state_dict
 
     def fit(trajectories):
         """
