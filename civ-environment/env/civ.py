@@ -58,35 +58,41 @@ class Civilization(AECEnv):
         # Initialize the observation spaces for each player
         self.visibility_maps = {agent: np.zeros((self.map_height, self.map_width), dtype=bool) for agent in self.agents}
         self.observation_spaces = {
-            agent: spaces.Dict({
-                "map": spaces.Box(
-                    low=0, 
-                    high=1, 
-                    shape=(
-                        self.map_height, 
-                        self.map_width, 
-                        self._calculate_num_channels()
-                    ), 
-                    dtype=np.float32
-                ),
-                "units": spaces.Box(
-                    low=0,
-                    high=np.inf,
-                    shape=(self.max_units_per_agent, self._calculate_unit_attributes()),
-                    dtype=np.float32
-                ),
-                "cities": spaces.Box(
-                    low=0,
-                    high=np.inf,
-                    shape=(
-                        self.max_cities,
-                        self._calculate_city_attributes()
+                agent: spaces.Dict({
+                    "map": spaces.Box(
+                        low=0, 
+                        high=1, 
+                        shape=(
+                            self.map_height, 
+                            self.map_width, 
+                            self._calculate_num_channels()
+                        ), 
+                        dtype=np.float32
                     ),
-                    dtype=np.float32
-                )
-            })
-            for agent in self.agents
-        }
+                    "units": spaces.Box(
+                        low=0,
+                        high=np.inf,
+                        shape=(self.max_units_per_agent, self._calculate_unit_attributes()),
+                        dtype=np.float32
+                    ),
+                    "cities": spaces.Box(
+                        low=0,
+                        high=np.inf,
+                        shape=(
+                            self.max_cities,
+                            self._calculate_city_attributes()
+                        ),
+                        dtype=np.float32
+                    ),
+                    "money": spaces.Box(
+                        low=0,
+                        high=np.inf,
+                        shape=(1,),
+                        dtype=np.float32
+                    )
+                })
+                for agent in self.agents
+            }
         # Hold the units for each player
         self.units = {agent: [] for agent in self.agents}
         # Hold the cities for each player
@@ -101,6 +107,8 @@ class Civilization(AECEnv):
         self.FOUND_CITY = 2
         self.ASSIGN_PROJECT = 3
         self.NO_OP = 4
+        self.BUY_WARRIOR = 5
+        self.BUY_SETTLER = 6
 
         # unit types
 
@@ -108,7 +116,7 @@ class Civilization(AECEnv):
         # Initialize the action spaces for each player
         self.action_spaces = {
             agent: spaces.Dict({
-                "action_type": spaces.Discrete(5),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP
+                "action_type": spaces.Discrete(7),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER
                 "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
                 "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
                 "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
@@ -129,17 +137,79 @@ class Civilization(AECEnv):
         pygame.display.set_caption('Civilization Environment')
         self.clock = pygame.time.Clock()
         #This can definitebly be improved, but for now it's just a placeholder.
-        #This is straught from the internet, needs to be changed
+        # Initialize money tracker
+        self.money = {agent: 0 for agent in self.agents}
+        self.gdp_bonus = {agent: 0 for agent in self.agents}
+        self.environmental_impact = {agent: 0 for agent in self.agents}
+        self.gdp_weight = 1.0
+        self.env_penalty_weight = 1.0
+        # Initialize projects
+        self.projects = {}
+        self._initialize_projects()
+        # Costs for buying units
+        self.WARRIOR_COST = 40
+        self.SETTLER_COST = 60
+        # Initialize constants for the reward function
+        self.k1 = 1.0  # Progress of projects
+        self.k2 = 2.0  # Completion of projects
+        self.k3 = 0.1  # Tiles explored
+        self.k4 = 5.0  # Cities captured
+        self.k5 = 5.0  # Cities lost
+        self.k6 = 1.0  # Units eliminated
+        self.k7 = 1.0  # Units lost
+        self.k8 = 0.5  # Change in GDP
+        self.k9 = 0.5  # Change in Energy output
+        self.k10 = 0.35 # Resources gained
+        self.gamma = 0.3  # Environmental impact penalty
+        # Tracking variables
+        self.previous_states = {agent: None for agent in self.agents}
+        self.units_lost = {agent: 0 for agent in self.agents}
+        self.units_eliminated = {agent: 0 for agent in self.agents}
+        self.cities_lost = {agent: 0 for agent in self.agents}
+        self.cities_captured = {agent: 0 for agent in self.agents}
+        self.resources_gained = {agent: 0 for agent in self.agents}
     
+        
+    def reward(self, agent, previous_state, current_state): 
+        # Calculate differences between current and previous states
+        P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
+        P_completion = current_state['completed_projects'] - previous_state['completed_projects']
+        C_tiles = current_state['explored_tiles'] - previous_state['explored_tiles']
+        C_cities = self.cities_captured[agent]
+        L_cities = self.cities_lost[agent]
+        C_units = self.units_eliminated[agent]
+        L_units = self.units_lost[agent]
+        delta_GDP = current_state['gdp'] - previous_state['gdp']
+        delta_Energy = current_state['energy_output'] - previous_state['energy_output']
+        C_resources = self.resources_gained[agent]
+        E_impact = current_state['environmental_impact'] # TODO: Evaluate making this change in env impact? 
+        # Reset temporary tracking variables
+        self.units_eliminated[agent] = 0
+        self.units_lost[agent] = 0
+        self.cities_captured[agent] = 0
+        self.cities_lost[agent] = 0
+        self.resources_gained[agent] = 0
+
+        # Compute the reward
+        reward = (self.k1 * P_progress + self.k2 * P_completion +
+                  self.k3 * C_tiles +
+                  self.k4 * C_cities - self.k5 * L_cities +
+                  self.k6 * C_units - self.k7 * L_units +
+                  self.k8 * delta_GDP +
+                  self.k9 * delta_Energy +
+                  self.k10 * C_resources -
+                  self.gamma * E_impact)
+        return reward
+
     def observe(self, agent):
         full_map = self.map.copy()
         visibility_map = self.visibility_maps[agent]
         
         # Mask unexplored areas
         masked_map = np.where(
-            visibility_map[:, :, np.newaxis], # idk if this is the correct way of doing this...
+            visibility_map[:, :, np.newaxis],
             full_map,
-            np.zeros_like(full_map)  # Fill unexplored areas with zeros. Maybe change this to a different value? 
+            np.zeros_like(full_map)
         )
         
         units_obs = np.zeros((self.max_units_per_agent, self._calculate_unit_attributes()), dtype=np.float32)
@@ -149,16 +219,22 @@ class Civilization(AECEnv):
         
         cities_obs = self._get_agent_cities(agent)
 
+        # Include money in the observation
+        money_obs = np.array([self.money[agent]], dtype=np.float32)
+
         # Return the observation dictionary
         observation = {
             "map": masked_map,
             "units": units_obs,
-            "cities": cities_obs
+            "cities": cities_obs,
+            "money": money_obs
         }
         return observation
 
     def step(self, action):
         agent = self.current_agent
+        prev_state = self._get_state_snapshot(agent)
+        self._process_city_projects(agent)
         action_type = action['action_type']
         
         if action_type == self.MOVE_UNIT:
@@ -180,32 +256,74 @@ class Civilization(AECEnv):
             project_id = action['project_id']
             self._handle_assign_project(agent, city_id, project_id)
         
+        elif action_type == self.BUY_WARRIOR:
+            city_id = action['city_id']
+            self._handle_buy_warrior(agent, city_id)
+        
+        elif action_type == self.BUY_SETTLER:
+            city_id = action['city_id']
+            self._handle_buy_settler(agent, city_id)
+        
         elif action_type == self.NO_OP:
             pass  # Do nothing
-        # TODO: Implement returning the observation, termination, and reward etc. etc. bullshit
-        
-        # Initialize rewards
-        rewards = {agent: 0 for agent in self.agents}
-        # TODO: ASSIGN REWARDS, USING A REWARD FUNCTION
+
+        # Update money (GDP is money per turn)
+        self.money[agent] += self._calculate_gdp(agent)
+        current_state = self._get_state_snapshot(agent)
+        reward = self.reward(agent, prev_state, current_state)
+        self.previous_states[agent] = current_state  # Update previous state
 
         # Check for termination (e.g., only one player remains)
         active_agents = [agent for agent in self.agents if self.units[agent] or self.cities[agent]] # We only leave agents that have either a city or a unit
         done = len(active_agents) <= 1
 
         # Prepare observations
-        observations = {agent: self.observe(agent) for agent in self.agents}
-        # TODO: RETURN OBSERVATIONS USING SELF.OBSERVE
+        observation = self.observe(agent)
 
-        # Prepare dones
-        dones = {agent: done for agent in self.agents}
-        dones['__all__'] = done
-
-        # Prepare infos
-        infos = {agent: {} for agent in self.agents}
+        # Prepare info
+        info = {}
 
         # Advance to the next agent
         self.current_agent = self.agent_selector.next()
 
+        #TODO: DO INFO? 
+
+        return observation, reward, done, info
+
+    def _get_state_snapshot(self, agent):
+        state = {
+            'projects_in_progress': len([city for city in self.cities[agent] if city.current_project is not None]),
+            'completed_projects': sum(city.completed_projects for city in self.cities[agent]), 
+            'explored_tiles': np.sum(self.visibility_maps[agent]), 
+            'cities_owned': len(self.cities[agent]),
+            'units_owned': len(self.units[agent]),
+            'gdp': self._calculate_gdp(agent),
+            'energy_output': self._calculate_energy_output(agent),
+            'resources_controlled': self._calculate_resources_controlled(agent),
+            'environmental_impact': self._calculate_environmental_impact(agent),
+        }
+        return state
+    
+    def _calculate_gdp(self, agent):
+        # Maybe a linear combination of units and cities owned? 
+        gdp = len(self.cities[agent]) * 2 + len(self.units[agent]) * 1 + self.gdp_bonus[agent]
+        # add a factor for the resources controlled?
+        # maybe slight randomness? would that help? 
+        return gdp
+
+    def _calculate_energy_output(self, agent):
+        # Sum up the resource values for each city
+        energy_output = sum(city.resources['resource'] for city in self.cities[agent])
+        return energy_output
+    
+    def _calculate_resources_controlled(self, agent):
+        # because i'm a dumbass with naming, use materials and water for this
+        resources_controlled = sum(city.resources['material'] for city in self.cities[agent]) + sum(city.resources['water'] for city in self.cities[agent])
+        return resources_controlled
+    
+    def _calculate_environmental_impact(self, agent):
+        # calculate this somehow idk 
+        return self.environmental_impact[agent]
     
     def _handle_move_unit(self, agent, action):
         unit_id = action['unit_id']
@@ -242,8 +360,43 @@ class Civilization(AECEnv):
         city_id = action['city_id']
         project_id = action['project_id']
         city = self.cities[agent][city_id]
-        city.current_project = project_id
-        city.project_duration = self._get_project_duration(project_id)
+        if city.current_project is None:
+            project = self.projects.get(project_id, None)
+            if project is not None:
+                city.current_project = project_id
+                city.project_duration = project['duration']
+            else:
+                raise ValueError(f"Invalid project ID: {project_id}")
+        else:
+            raise ValueError(f"City {city_id} is already working on a project.")
+    
+    def _handle_buy_warrior(self, agent, city_id):
+        city = self.cities[agent][city_id]
+        cost = self.WARRIOR_COST
+        if self.money[agent] >= cost:
+            self.money[agent] -= cost
+            x, y = city.x, city.y
+            placed = self._place_unit_near_city(agent, 'warrior', x, y)
+            if not placed:
+                # Handle case where no adjacent empty tile is found
+                pass
+        else:
+            # Handle insufficient funds
+            pass
+    
+    def _handle_buy_settler(self, agent, city_id):
+        city = self.cities[agent][city_id]
+        cost = self.SETTLER_COST
+        if self.money[agent] >= cost:
+            self.money[agent] -= cost
+            x, y = city.x, city.y
+            placed = self._place_unit_near_city(agent, 'settler', x, y)
+            if not placed:
+                # Handle case where no adjacent empty tile is found
+                pass
+        else:
+            # Handle insufficient funds
+            pass
 
     class Unit:
         def __init__(self, x, y, unit_type, owner, env):
@@ -272,12 +425,6 @@ class Civilization(AECEnv):
                 pass
 
         def attack(self, direction):
-            '''
-            Attack an enemy unit or city in the specified direction.
-
-            Args:
-                direction (int): Direction to attack (0: up, 1: right, 2: down, 3: left).
-            '''
             if self.type != 'warrior':
                 print(f"Unit {self} is not a warrior and cannot attack.")
                 return
@@ -297,8 +444,16 @@ class Civilization(AECEnv):
                     print(f"Target {target.type} at ({target.x}, {target.y}) has been destroyed.")
                     self.env.last_target_destroyed = True
                     self.env._remove_unit_or_city(target)
+                    # Update tracking variables
+                    if isinstance(target, self.env.Unit):
+                        self.env.units_eliminated[self.owner] += 1
+                        self.env.units_lost[target.owner] += 1
+                    elif isinstance(target, self.env.City):
+                        self.env.cities_captured[self.owner] += 1
+                        self.env.cities_lost[target.owner] += 1
             else:
                 print(f"No enemy to attack in direction {direction} from ({self.x}, {self.y}).")
+
         
         # TODO: Maybe add defending? 
         
@@ -451,27 +606,23 @@ class Civilization(AECEnv):
         return None
 
     def _remove_unit_or_city(self, target):
-        """
-        Remove a unit or city from the environment.
-
-        Args:
-            target (Unit or City): The target to be removed.
-        """
         owner = target.owner
         if isinstance(target, self.Unit):
             self.units[owner].remove(target)
-            # Determine the channel based on unit type
-            unit_types = {'warrior': 1, 'settler': 2} # To stay consistent with the representations defined before, where 0 = city
+            unit_types = {'warrior': 1, 'settler': 2}
             channel_offset = unit_types.get(target.type, None)
             if channel_offset is not None:
                 channel = self.num_of_agents + (3 * self.agents.index(owner)) + channel_offset
                 self.map[target.y, target.x, channel] = 0
+            # Would we be double counting if we did this here?
+            # self.units_lost[owner] += 1
         elif isinstance(target, self.City):
             self.cities[owner].remove(target)
-            # Channel for cities is offset 0
             channel = self.num_of_agents + (3 * self.agents.index(owner))
             self.map[target.y, target.x, channel] = 0
-
+            # Would we be double counting if we did this here? 
+            # self.cities_lost[owner] += 1
+    
     def _update_map_with_new_city(self, agent, city):
         x, y = city.x, city.y
         # Update the map to reflect the new city
@@ -488,7 +639,7 @@ class Civilization(AECEnv):
             self.health = 100
             self.resources = self._get_resources()
             self.finished_projects = [0 for _ in range(self.max_projects)]
-            self.current_project = 0
+            self.current_project = None
             self.project_duration = 0
             self.owner = owner
             self.env = env
@@ -498,7 +649,7 @@ class Civilization(AECEnv):
             Initialize resources for the city by scanning surrounding tiles.
             Returns a dictionary with resource types and their quantities.
             """
-            resources = {'resource': 0, 'material': 1, 'water': 2}
+            resources = {'resource': 0, 'material': 0, 'water': 0}
             scan_range = 2  # Scan 2 tiles around the city
 
             for dx in range(-scan_range, scan_range + 1):
@@ -564,23 +715,41 @@ class Civilization(AECEnv):
 
         # TODO: Implement more complex world generation and spawn point selection?
     
-    def _get_agent_cities(self, agent):
-        """
-        Get the cities of the specified agent as a numpy array.
-        Args:
-            agent (str): The agent's name.
+    def _initialize_projects(self):
+        self.projects[0] = {'name': 'Make Warrior', 'duration': 3, 'type': 'unit', 'unit_type': 'warrior'}
+        self.projects[1] = {'name': 'Make Settler', 'duration': 5, 'type': 'unit', 'unit_type': 'settler'}
+        num_remaining_projects = self.max_projects - 2
+        num_friendly_projects = num_remaining_projects // 2
+        num_destructive_projects = num_remaining_projects - num_friendly_projects
 
-        Returns:
-            np.ndarray: Array of shape (max_cities, num_city_attributes).
-        """
+        for i in range(num_friendly_projects):
+            project_id = i + 2
+            self.projects[project_id] = {
+                'name': f'Eco Project {i+1}',
+                'duration': 5,
+                'type': 'friendly',
+                'gdp_boost': 12,
+                'penalty': 1
+            }
+
+        for i in range(num_destructive_projects):
+            project_id = i + 2 + num_friendly_projects
+            self.projects[project_id] = {
+                'name': f'Destructive Project {i+1}',
+                'duration': 3,
+                'type': 'destructive',
+                'gdp_boost': 20,
+                'penalty': 5
+            }
+
+
+    def _get_agent_cities(self, agent):
         num_attributes = self._calculate_city_attributes()
         cities_obs = np.zeros((self.max_cities, num_attributes), dtype=np.float32)
         
         for idx, city in enumerate(self.cities[agent]):
             if idx >= self.max_cities:
-                break  # Limit to max_cities
-            
-            # Extract city attributes
+                break
             city_data = [
                 city.health,     # Health
                 city.x,          # X coordinate
@@ -589,22 +758,11 @@ class Civilization(AECEnv):
                 city.resources.get('material', 0),  # Material
                 city.resources.get('water', 0),      # Water
             ]
-            
-            # Finished Projects (Assuming it's a list of binary indicators)
-            # If max_projects is 5, include only the first 5
-            finished_projects = city.finished_projects[:self.max_projects]
-            # Ensure that finished_projects has exactly max_projects elements
-            while len(finished_projects) < self.max_projects:
-                finished_projects.append(0)
+            finished_projects = [0] * self.max_projects
+            finished_projects[:city.completed_projects] = [1] * city.completed_projects
             city_data.extend(finished_projects)
-            
-            # Current Project
-            city_data.append(city.current_project)
-            
-            # Project Duration
+            city_data.append(city.current_project if city.current_project is not None else -1)
             city_data.append(city.project_duration)
-            
-            # Assign to the cities_obs array
             cities_obs[idx] = city_data[:num_attributes]
         
         return cities_obs
@@ -687,11 +845,93 @@ class Civilization(AECEnv):
     
     def _is_tile_empty(self, x, y):
         """
-        Check if a tile is empty (no units, resources, or ownership).
-        # TODO: Right now, this is **too** simple. It's fine if there are resources, just need to make sure it's not owned and there are no other units.
-        It might be a good idea to make this return as to *what* is there (nothing, unit from player 2 + resource, etc.) and go on with that information.
+        Check if a tile is empty for placement purposes.
+        A tile is considered empty if:
+            - It is not owned by any agent.
+            - There are no units or cities on it.
+        Resources are allowed on the tile.
+
+        Args:
+            x (int): x-coordinate of the tile.
+            y (int): y-coordinate of the tile.
+
+        Returns:
+            bool: True if the tile is empty for placement; False otherwise.
         """
-        return np.all(self.map[y, x, :] == 0)
+        # Check ownership channels
+        for agent_idx, agent in enumerate(self.agents):
+            if self.map[y, x, agent_idx] > 0:
+                return False  # Tile is owned by an agent
+
+        # Check units on the tile
+        for agent in self.agents:
+            for unit in self.units[agent]:
+                if unit.x == x and unit.y == y:
+                    return False  # Tile has a unit
+
+        # Check cities on the tile
+        for agent in self.agents:
+            for city in self.cities[agent]:
+                if city.x == x and city.y == y:
+                    return False  # Tile has a city
+
+        # If no ownership, units, or cities are present, the tile is empty
+        return True
+
+    def _get_tile_info(self, x, y):
+        """
+        Retrieve detailed information about the tile at (x, y).
+
+        Args:
+            x (int): x-coordinate.
+            y (int): y-coordinate.
+
+        Returns:
+            dict: Information about the tile contents.
+                'ownership': None or agent name owning the tile.
+                'units': list of units present on the tile.
+                'cities': list of cities present on the tile.
+                'resources': list of resources present on the tile.
+        """
+        tile_info = {
+            'ownership': None,
+            'units': [],
+            'cities': [],
+            'resources': []
+        }
+
+        # Check ownership channels
+        for agent_idx, agent in enumerate(self.agents):
+            if self.map[y, x, agent_idx] > 0:
+                tile_info['ownership'] = agent
+                break  # Only one agent can own a tile
+
+        # Check units
+        for agent in self.agents:
+            for unit in self.units[agent]:
+                if unit.x == x and unit.y == y:
+                    tile_info['units'].append(unit)
+
+        # Check cities
+        for agent in self.agents:
+            for city in self.cities[agent]:
+                if city.x == x and city.y == y:
+                    tile_info['cities'].append(city)
+
+        # Check resources
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
+        resources_channel = resource_channels_start
+        materials_channel = resource_channels_start + 1
+        water_channel = resource_channels_start + 2
+
+        if self.map[y, x, resources_channel] > 0:
+            tile_info['resources'].append('resource')
+        if self.map[y, x, materials_channel] > 0:
+            tile_info['resources'].append('material')
+        if self.map[y, x, water_channel] > 0:
+            tile_info['resources'].append('water')
+
+        return tile_info
 
     def _place_unit(self, agent_idx, unit_type, x, y):
         """
@@ -711,6 +951,15 @@ class Civilization(AECEnv):
         self.units[self.agents[agent_idx]].append(unit)
         self._update_visibility(self.agents[agent_idx], x, y)
     
+    def _place_unit_near_city(self, agent, unit_type, x, y):
+        adjacent_tiles = self._get_adjacent_tiles(x, y)
+        for adj_x, adj_y in adjacent_tiles:
+            if self._is_tile_empty(adj_x, adj_y):
+                self._place_unit(self.agents.index(agent), unit_type, adj_x, adj_y)
+                return True
+        return False
+
+
     def _get_adjacent_tiles(self, x, y):
         """
         Get a list of adjacent tile coordinates to (x, y), considering map boundaries.
@@ -726,6 +975,68 @@ class Civilization(AECEnv):
                 if 0 <= adj_x < self.map_width and 0 <= adj_y < self.map_height:
                     adjacent_coords.append((adj_x, adj_y))
         return adjacent_coords
+
+    def _process_city_projects(self, agent):
+        for city in self.cities[agent]:
+            if city.current_project is not None:
+                city.project_duration -= 1
+                if city.project_duration <= 0:
+                    project_id = city.current_project
+                    self._complete_project(agent, city, project_id)
+                    city.current_project = None
+
+    def _complete_project(self, agent, city, project_id):
+        project = self.projects[project_id]
+        if project['type'] == 'unit':
+            unit_type = project['unit_type']
+            x, y = city.x, city.y
+            placed = self._place_unit_near_city(agent, unit_type, x, y)
+            if not placed:
+                pass
+        elif project['type'] == 'friendly':
+            gdp_boost = project.get('gdp_boost', 0)
+            penalty = project.get('penalty', 0)
+            self._apply_gdp_boost(agent, gdp_boost)
+            self._apply_penalty(agent, penalty)
+        elif project['type'] == 'destructive':
+            gdp_boost = project.get('gdp_boost', 0)
+            penalty = project.get('penalty', 0)
+            self._apply_gdp_boost(agent, gdp_boost)
+            self._apply_penalty(agent, penalty)
+            self._destroy_resource_in_city_tiles(agent, city)
+        city.completed_projects += 1
+
+    def _apply_gdp_boost(self, agent, amount):
+        self.gdp_bonus[agent] += amount
+
+    def _apply_penalty(self, agent, amount):
+        self.environmental_impact[agent] += amount
+
+    def _destroy_resource_in_city_tiles(self, agent, city):
+        x, y = city.x, city.y
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
+        resources_channel = resource_channels_start
+        materials_channel = resource_channels_start + 1
+        water_channel = resource_channels_start + 2
+
+        resource_found = False
+
+        for channel in [resources_channel, materials_channel, water_channel]:
+            if self.map[y, x, channel] > 0:
+                self.map[y, x, channel] = 0
+                resource_found = True
+                break
+
+        if not resource_found:
+            adjacent_tiles = self._get_adjacent_tiles(x, y)
+            for adj_x, adj_y in adjacent_tiles:
+                for channel in [resources_channel, materials_channel, water_channel]:
+                    if self.map[adj_y, adj_x, channel] > 0:
+                        self.map[adj_y, adj_x, channel] = 0
+                        resource_found = True
+                        break
+                if resource_found:
+                    break
 
     def render(self):
         """
@@ -911,6 +1222,7 @@ class Civilization(AECEnv):
         """
         Reset the environment.
         """
+
         self.agents = self.possible_agents[:]
         self.units = {agent: [] for agent in self.agents}
         self.cities = {agent: [] for agent in self.agents}
@@ -918,7 +1230,9 @@ class Civilization(AECEnv):
         self.current_agent = self.agent_selector.next()
         
         self._initialize_map()
+
         # Reset visibility maps
+
         self.visibility_maps = {agent: np.zeros((self.map_height, self.map_width), dtype=bool) for agent in self.agents}
         for agent in self.agents:
             for unit in self.units[agent]:
@@ -926,19 +1240,23 @@ class Civilization(AECEnv):
             for city in self.cities[agent]:
                 self._update_visibility(agent, city.x, city.y)
 
-        # Initialize tracking variables
         self.last_attacker = None
         self.last_target_destroyed = False
-        
-        # Prepare initial observations
+        self.previous_states = {agent: self._get_state_snapshot(agent) for agent in self.agents}
+        self.units_lost = {agent: 0 for agent in self.agents}
+        self.units_eliminated = {agent: 0 for agent in self.agents}
+        self.cities_lost = {agent: 0 for agent in self.agents}
+        self.cities_captured = {agent: 0 for agent in self.agents}
+        self.resources_gained = {agent: 0 for agent in self.agents}
+        self.money = {agent: 0 for agent in self.agents}  # Reset money for each agent
+
         observations = {agent: self.observe(agent) for agent in self.agents}
-        
-        # Initialize rewards, dones, and infos
+
         rewards = {agent: 0 for agent in self.agents}
         dones = {agent: False for agent in self.agents}
         dones['__all__'] = False
         infos = {agent: {} for agent in self.agents}
-        
+
         return observations
 
 
