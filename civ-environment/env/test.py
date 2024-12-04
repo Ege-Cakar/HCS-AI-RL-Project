@@ -31,11 +31,11 @@ def main():
     env = wrappers.OrderEnforcingWrapper(env)
 
     # Define hyperparameters
-    hidden_size = 256
+    hidden_size = 1024
     lambdaa = 0.01
-    n_iters = 10
-    n_fit_trajectories = 5
-    n_sample_trajectories = 5
+    n_iters = 10000
+    n_fit_trajectories = 1000
+    n_sample_trajectories = 1000
     max_steps = 50 #TO CHANGE
 
     # Initialize policies and optimizers

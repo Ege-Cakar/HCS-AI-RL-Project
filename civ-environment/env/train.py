@@ -16,6 +16,7 @@ import scipy.optimize as opt
 from typing import TypeVar, Callable
 import jax.numpy as jnp
 import torch.nn.functional as F
+from tqdm import tqdm
 
 
 from civ import Civilization
@@ -78,7 +79,7 @@ class ProximalPolicyOptimization:
         #This code is taken from class
         theta_list = self.theta_inits
 
-        for _ in range(self.n_iters):
+        for _ in tqdm(range(self.n_iters), desc="Training Iterations"):
             n_agents = len(self.actor_policies)
 
             trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies, n_agents)
@@ -86,7 +87,7 @@ class ProximalPolicyOptimization:
             for step in range(self.max_steps):
 
                 for agent_idx in range(n_agents):
-                    print("On agent", agent_idx)
+                    #print("On agent", agent_idx)
                     agent = self.env.agent_selection                
                     trajectories_next_step = self.sample_trajectories( #for a single agent
                         self.env,
@@ -312,7 +313,7 @@ class ProximalPolicyOptimization:
                 and the other takes into account present observation and encoded history in deciding a value estimate for 
         """
 
-        print("Running sample_trajectories")
+        #print("Running sample_trajectories")
         agent = env.agent_selection                
 
         trajectories_next_step=[] #ends up being a list of num_agents length, where each element is what gets added to existing trajectory     
