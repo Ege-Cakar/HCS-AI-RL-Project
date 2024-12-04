@@ -36,7 +36,7 @@ def main():
     n_iters = 10
     n_fit_trajectories = 5
     n_sample_trajectories = 5
-    max_steps = 200
+    max_steps = 50 #TO CHANGE
 
     # Initialize policies and optimizers
     actor_policies = {}

@@ -66,7 +66,15 @@ class ProximalPolicyOptimization:
         Returns:
             Trained policy parameters, theta.
         """
+        actor_optimizers = {
+            agent: torch.optim.Adam(policy.parameters(), lr=1e-3)
+            for agent, policy in self.actor_policies.items()
+        }
 
+        critic_optimizers = {
+            agent: torch.optim.Adam(policy.parameters(), lr=1e-3)
+            for agent, policy in self.critic_policies.items()
+        }
         #This code is taken from class
         theta_list = self.theta_inits
 
@@ -87,26 +95,110 @@ class ProximalPolicyOptimization:
                         trajectories[agent_idx],
                         n_agents
                     )
-                    trajectories[agent_idx].append(trajectories_next_step)
-                    print(len(trajectories[agent_idx]))
+                trajectories[agent_idx].extend(trajectories_next_step)
 
-            A_hat_list = [self.fit(agent_fit_trajectories) for agent_fit_trajectories in trajectories]
 
+        # Process trajectories
+        states = torch.stack([t[0] for t in trajectories])  # States
+        obs = torch.stack([self.flatten_observation(t[1]) for t in trajectories])
+        actions = torch.stack([t[4] for t in trajectories])  # Actions
+        rewards = torch.tensor([t[5] for t in trajectories], dtype=torch.float32)  # Rewards
+        next_states = torch.stack([t[6] for t in trajectories])  # Next states
         
-            for agent_idx, theta in enumerate(theta_list):
-                def objective(theta_opt):
-                    total_objective = 0
-                    for tau in trajectories[agent_idx]:
-                        for s, a, _r in tau:
-                            pi_curr = self.pi(theta)(s, a)
-                            pi_new = self.pi(theta_opt)(s, a)
-                            total_objective += pi_new / pi_curr * A_hat_list[agent_idx](s, a) + self.lambdaa * torch.log(pi_new)
-                    return total_objective / self.n_sample_trajectories
-                
-                theta_list[agent_idx] = self.optimize(self.actor_polices[agent_idx], self.critic_policies[agent_idx], sample_trajectories, learning_rate=1e-3)
 
-        return theta_list
-    
+        # Compute returns (discounted rewards-to-go)
+        returns = self.compute_returns(rewards)
+
+        # Compute values from critic
+        values = []
+        for agent, critic_policy in self.critic_policies.items():
+            agent_states = states[agent]  # Assuming `states` is a dictionary or can be indexed by `agent`
+            value, _ = critic_policy(agent_states, None)  # Pass the states for the specific agent
+            values.append(value)
+
+        values = torch.stack(values)  # Combine the values for all agents
+        values = values.squeeze()
+
+        # Compute advantages (returns - values)
+        advantages = returns - values.detach()
+
+        # Actor update: Policy gradient loss
+        action_probs = []
+        log_probs = []
+        actions = []
+
+        for agent, actor_policy in self.actor_policies.items():
+            agent_obs = obs[agent]  # Assuming `obs` is indexed by agent
+            agent_obs = ActorRNN.process_observation(agent_obs)
+            action_prob, _ = actor_policy(agent_obs, None)  # Pass reshaped observation to RNN
+
+            # Sample actions and compute log probabilities
+            action_type_dist = Categorical(probs=action_prob['action_type'])
+            action_type = action_type_dist.sample().item()  # Sampled action
+            action_type_log_prob = action_type_dist.log_prob(torch.tensor(action_type))  # Log prob of sampled action
+
+            unit_id_dist = Categorical(probs=action_prob['unit_id'])
+            unit_id = unit_id_dist.sample().item()
+            unit_id_log_prob = unit_id_dist.log_prob(torch.tensor(unit_id))
+
+            direction_dist = Categorical(probs=action_prob['direction'])
+            direction = direction_dist.sample().item()
+            direction_log_prob = direction_dist.log_prob(torch.tensor(direction))
+
+            city_id_dist = Categorical(probs=action_prob['city_id'])
+            city_id = city_id_dist.sample().item()
+            city_id_log_prob = city_id_dist.log_prob(torch.tensor(city_id))
+
+            project_id_dist = Categorical(probs=action_prob['project_id'])
+            project_id = project_id_dist.sample().item()
+            project_id_log_prob = project_id_dist.log_prob(torch.tensor(project_id))
+
+            # Store sampled actions
+            actions.append({
+                'action_type': action_type,
+                'unit_id': unit_id,
+                'direction': direction,
+                'city_id': city_id,
+                'project_id': project_id
+            })
+
+            # Sum log probabilities for all action types
+            total_log_prob = (action_type_log_prob +
+                            unit_id_log_prob +
+                            direction_log_prob +
+                            city_id_log_prob +
+                            project_id_log_prob)
+
+            log_probs.append(total_log_prob)
+
+        # Combine log probabilities into a single tensor
+        log_probs = torch.stack(log_probs)
+
+        actor_loss = -(log_probs * advantages).mean()  # Policy gradient loss
+
+        # Zero out gradients for all actor optimizers
+        for optimizer in actor_optimizers.values():
+            optimizer.zero_grad()
+        
+        actor_loss.backward()
+
+        for optimizer in actor_optimizers.values():
+            optimizer.step()
+
+        # Critic update: MSE loss
+        critic_loss = F.mse_loss(values, returns)
+
+        # Zero out gradients for all actor optimizers
+        for optimizer in critic_optimizers.values():
+            optimizer.zero_grad()
+        
+        critic_loss.backward()
+        
+        for optimizer in critic_optimizers.values():
+            optimizer.step()
+
+        return actor_loss.item(), critic_loss.item()
+
     def get_global_state(env, n_agents):
 
         obs_for_critic = []
@@ -144,37 +236,52 @@ class ProximalPolicyOptimization:
         state = torch.cat([critic_dict[key] for key in critic_dict]).unsqueeze(0)    
         return state
 
-    def initialize_starting_trajectories(self, env, actor_policies, n_agents):
+    def initialize_starting_trajectories(self,env, actor_policies, n_agents):
+        """
+        Initialize the starting trajectories for each agent.
+
+        Args:
+            env: The environment.
+            actor_policies: A dictionary of actor policies for each agent.
+            critic_policies: A dictionary of critic policies for each agent.
+
+        Returns:
+            A list of initial trajectories, one for each agent.
+        """
         starting_trajectories = []
 
-        initial_state = ProximalPolicyOptimization.get_global_state(env, n_agents)
+        n_agents = len(env.agents)
+        initial_state = ProximalPolicyOptimization.get_global_state(env, n_agents) # Global state
 
         for agent_idx, agent in enumerate(env.agents):
-            initial_observation = env.observe(agent)
+            # Initial state and observation for each agent
+            initial_observation = env.observe(agent)  # Local observation for the agent
+
+            # Initialize hidden states for actor and critic networks
             input_size = actor_policies[agent_idx].hidden_size
-            actor_hidden_state = torch.zeros(1, 1, input_size)
+            actor_hidden_state = torch.zeros(1, 1, input_size)  # Shape: (1, batch_size, hidden_size)
             critic_hidden_state = torch.zeros(1, 1, input_size)
-            initial_action = None
-            initial_reward = 0
-            initial_next_state = initial_state
-            initial_next_observation = initial_observation
 
-            initial_time_step = [
-                initial_state,
-                initial_observation,
-                actor_hidden_state,
-                critic_hidden_state,
-                initial_action,
-                initial_reward,
-                initial_next_state,
-                initial_next_observation
+            # Placeholder for the rest of the trajectory components
+            initial_action = torch.zeros((5,), dtype=torch.float32)  # Adjust `action_space_size` as needed
+            initial_reward = 0  # No reward has been received yet
+            initial_next_state = initial_state  # Initial state is also the "next state"
+            initial_next_observation = initial_observation  # Same for the observation
+
+            # Create the initial trajectory structure
+            starting_trajectory = [
+                initial_state,             # State at time t
+                initial_observation,       # Observation at time t
+                actor_hidden_state,        # Actor hidden state
+                critic_hidden_state,       # Critic hidden state
+                initial_action,            # Action at time t (None at start)
+                initial_reward,            # Reward at time t (0 at start)
+                initial_next_state,        # Next state (same as initial state)
+                initial_next_observation   # Next observation (same as initial observation)
             ]
-
-            starting_trajectory = [initial_time_step]  # Wrap in a list to create a trajectory
             starting_trajectories.append(starting_trajectory)
 
         return starting_trajectories
-
 
     def sample_trajectories(self,env, actor_policy, critic_policy, past_trajectory, n_agents):
         """
@@ -210,14 +317,11 @@ class ProximalPolicyOptimization:
 
         trajectories_next_step=[] #ends up being a list of num_agents length, where each element is what gets added to existing trajectory     
         
-        past_time_step = past_trajectory[-1]
-
-
         #past_trajectory's last elements include state, obs, hidden actor, hidden critic, action, reward next time step, state next time step, obs next time step
-        actor_hidden_state = past_time_step[-6] 
-        critic_hidden_state = past_time_step[-5]
-        state_t = past_time_step[-2]
-        obs_t = past_time_step[-1]
+        actor_hidden_state = past_trajectory[-6] 
+        critic_hidden_state = past_trajectory[-5]
+        state_t = past_trajectory[-2]
+        obs_t = past_trajectory[-1]
 
 
         obs_t_tensor = ActorRNN.process_observation(obs_t)
@@ -277,63 +381,107 @@ class ProximalPolicyOptimization:
             'project_id': project_id,
         }
         return action
-
-
-    def fit(trajectories):
+    def flatten_observation(self, observation):
         """
-        Fit the advantage function from the given trajectories.
+        Flattens a dictionary of observations into a single tensor.
 
         Args:
-            trajectories: A list of trajectories. Each trajectory is a list of (state, action, reward) tuples.
+            observation (dict): A dictionary of observations.
 
         Returns:
-            A_hat: A callable advantage function A_hat(s, a).
+            torch.Tensor: A flattened tensor of concatenated observation values.
         """
-        def compute_returns(rewards, gamma=0.99):
+        tensors = []
+        for key, value in observation.items():
+            if isinstance(value, np.ndarray):  # Convert NumPy arrays to tensors
+                value = torch.tensor(value, dtype=torch.float32)
+            elif not isinstance(value, torch.Tensor):  # Skip non-tensor types
+                continue
+            tensors.append(value.flatten())  # Flatten each tensor
+        return torch.cat(tensors)  # Concatenate into a single tensor
+
+    def compute_returns(self, rewards, gamma=0.99):
             """
-            Compute the discounted returns for a trajectory.
+            Compute the discounted rewards-to-go (returns) for a given list of rewards.
 
             Args:
-                rewards: A list of rewards for a single trajectory.
-                gamma: Discount factor for future rewards.
+                rewards (torch.Tensor): A 1D tensor of rewards for a trajectory.
+                gamma (float): Discount factor for future rewards. Default is 0.99.
 
             Returns:
-                Discounted returns.
+                torch.Tensor: A 1D tensor of discounted rewards-to-go (returns).
             """
-            returns = []
-            discounted_sum = 0
-            for r in reversed(rewards):
-                discounted_sum = r + gamma * discounted_sum
-                returns.insert(0, discounted_sum)
+            returns = torch.zeros_like(rewards)
+            discounted_sum = 0.0
+
+            # Calculate the returns in reverse order
+            for t in reversed(range(len(rewards))):
+                discounted_sum = rewards[t] + gamma * discounted_sum
+                returns[t] = discounted_sum
+
             return returns
 
-        states, actions, rewards = [], [], []
+    def fit(self, trajectories, critic_policy, gamma=0.99, lam=0.95):
+        """
+        Compute the advantages using GAE for the given trajectories.
+
+        Args:
+            trajectories: A list of trajectories. Each trajectory is a list of time steps,
+                        and each time step is a list containing:
+                        [state_t, obs_t, actor_hidden_state, critic_hidden_state,
+                        action_t, reward_t, next_state_t, next_obs_t]
+            critic_policy: The critic network to estimate value functions.
+            gamma: Discount factor for future rewards.
+            lam: Lambda for Generalized Advantage Estimation (GAE).
+
+        Returns:
+            advantages: A list of advantages for each time step in the trajectories.
+            td_targets: A list of TD targets for updating the critic.
+        """
+        all_advantages = []
+        all_td_targets = []
+        all_values = []
+
         for trajectory in trajectories:
-            for s, a, r in trajectory:
-                states.append(s)
-                actions.append(a)
-                rewards.append(r)
+            states = torch.stack([t[0] for t in trajectory])
+            rewards = torch.tensor([t[5] for t in trajectory], dtype=torch.float32)
+            next_states = torch.stack([t[6] for t in trajectory])
+            dones = torch.tensor([False] * len(trajectory), dtype=torch.float32)  # Assuming all trajectories are not done
 
-        # Compute returns for each trajectory
-        all_returns = []
-        for trajectory in trajectories:
-            rewards = [r for _, _, r in trajectory]
-            all_returns.extend(compute_returns(rewards))
+            # Initialize hidden state for critic
+            critic_hidden_state = torch.zeros(1, 1, critic_policy.hidden_size)
 
-        states = np.array(states)
-        actions = np.array(actions)
-        returns = np.array(all_returns)
+            # Compute values and next values
+            with torch.no_grad():
+                values, _ = critic_policy(states, critic_hidden_state)
+                next_values, _ = critic_policy(next_states, critic_hidden_state)
+                values = values.squeeze()
+                next_values = next_values.squeeze()
 
-        # Estimate the value function V(s) as the average return for each state
-        unique_states = np.unique(states, axis=0)
-        state_to_value = {tuple(s): returns[states == s].mean() for s in unique_states}
-        V = lambda s: state_to_value.get(tuple(s), 0)
+            # Compute advantages using GAE
+            advantages = []
+            gae = 0
+            td_targets = []
+            for t in reversed(range(len(rewards))):
+                delta = rewards[t] + gamma * next_values[t] * (1 - dones[t]) - values[t]
+                gae = delta + gamma * lam * (1 - dones[t]) * gae
+                advantages.insert(0, gae)
+                td_targets.insert(0, rewards[t] + gamma * next_values[t] * (1 - dones[t]))
 
-        # Define the advantage function A(s, a) = Q(s, a) - V(s)
-        def A_hat(s, a):
-            return returns[(states == s) & (actions == a)].mean() - V(s)
+            all_advantages.extend(advantages)
+            all_td_targets.extend(td_targets)
+            all_values.extend(values)
 
-        return A_hat
+        # Convert lists to tensors
+        advantages = torch.tensor(all_advantages, dtype=torch.float32)
+        td_targets = torch.tensor(all_td_targets, dtype=torch.float32)
+        values = torch.tensor(all_values, dtype=torch.float32)
+
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        return advantages, td_targets
+
     
     def optimize(
         actor_policy,
