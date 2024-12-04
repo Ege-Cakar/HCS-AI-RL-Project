@@ -19,7 +19,6 @@ import torch.nn.functional as F
 
 
 from civ import Civilization
-from reward import RewardCalculator
 
 # Type aliases for readability
 State = TypeVar("State")  # Represents the state type
@@ -43,7 +42,7 @@ class ProximalPolicyOptimization:
         self.actor_policies = actor_policies
         self.critic_policies = critic_policies 
         self.lambdaa = lambdaa
-        self.thetas = theta_inits
+        self.theta_inits = theta_inits
         self.n_iters = n_iters
         self.n_fit_trajectories = n_fit_trajectories
         self.n_sample_trajectories = n_sample_trajectories
@@ -108,7 +107,7 @@ class ProximalPolicyOptimization:
 
         return theta_list
 
-    def sample_trajectories(env, actor_policies, critic_policies, num_trajectories, max_steps=100):
+    def sample_trajectories(env, actor_policy, critic_policy, num_trajectories, max_steps=100):
         """
         Based off of Yu et al.'s 2022 paper on Recurrent MAPPO.
         Collect trajectories by interacting with the environment using recurrent actor and critic networks.
@@ -144,10 +143,9 @@ class ProximalPolicyOptimization:
             
             # Reset environment and get initial state, converted to usable format
             env.reset()
-            state = env.observe()
             # Initialize hidden states for actor and critic networks
-            actor_hidden_states = {agent: torch.zeros(1, actor_policies[agent].hidden_size) for agent in env.agents}
-            critic_hidden_states = {agent: torch.zeros(1, critic_policies[agent].hidden_size) for agent in env.agents}
+            actor_hidden_states = {agent: torch.zeros(1, 1, actor_policy.hidden_size) for agent in env.agents}
+            critic_hidden_states = {agent: torch.zeros(1, 1, critic_policy.hidden_size) for agent in env.agents}
 
             for t in range(max_steps):
                 actions = {}
@@ -157,47 +155,76 @@ class ProximalPolicyOptimization:
                 rewards = {}
                 next_states = {}
                 dones = {}
-                
-                for agent in env.agents:
+                obs_for_critic = []
+
+                for _ in env.agents:
                     # Get agent's observation
+                    agent = env.agent_selection
                     obs = env.observe(agent)
-                    obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+                    obs_for_critic.append(obs)
+                    for key in obs:
+                        obs[key] = torch.tensor(obs[key], dtype=torch.float32).flatten()
+                    obs_tensor = torch.cat([obs[key] for key in obs]).unsqueeze(0)
                     
                     # Actor policy: get action distribution and next hidden state
-                    action_probs, next_actor_hidden = actor_policies[agent](obs_tensor, actor_hidden_states[agent])
+                    action_probs, next_actor_hidden = actor_policy(obs_tensor, actor_hidden_states[agent])
                     action_dist = Categorical(probs=action_probs)
                     action = action_dist.sample().item()
                     actions[agent] = action
+                    env.step(action)
+                    # env.agent_selection
                     next_actor_hidden_states[agent] = next_actor_hidden
 
-                    # Critic policy: get value estimate and next hidden state
-                    value, next_critic_hidden = critic_policies[agent](obs_tensor, critic_hidden_states[agent])
-                    next_critic_hidden_states[agent] = next_critic_hidden
+                
+                # Critic policy: get value estimate and next hidden state
+                critic_dict = {}
+                # this is stupid naming, this is just the mask
+                critic_visibility = env.get_full_masked_map()
+                map_copy = env.map.copy()
+                # do the masking
+                critic_map = np.where(critic_visibility[:, :, np.newaxis].squeeze(2), map_copy, np.zeros_like(map_copy))
+                #print(critic_map.shape)
+                # THIS MIGHT FUCK THINGS UP IN THE FUTURE. 
+                critic_dict['map'] = critic_map
+                critic_dict['units'] = None
+                critic_dict['cities'] = None
+                critic_dict['money'] = None
+                for obs in obs_for_critic:
+                    for key in obs:
+                        if key != 'map':
+                            if critic_dict[key] is None: 
+                                critic_dict[key] = obs[key]
+                            else:
+                                critic_dict[key] = np.concatenate((critic_dict[key], obs[key]), axis=0) #idk if you can concatenate spaces.box
+                        else: 
+                            pass
+
+                for key in critic_dict: 
+                    critic_dict[key] = torch.tensor(critic_dict[key], dtype=torch.float32).flatten()
+                critic_tensor = torch.cat([critic_dict[key] for key in critic_dict]).unsqueeze(0)    
+                
+                value, next_critic_hidden = critic_policy(critic_tensor, critic_hidden_states[agent])
+                next_critic_hidden_states[agent] = next_critic_hidden
 
                 # Step environment with all actions
-                next_obs = env.observe(agent)
-                rewards = env.rewards(agent)
-                dones = env.dones(agent)
+                rewards = env.rewards
+                dones = env.dones
 
                 # Store the current step in the trajectory
                 for agent in env.agents:
                     trajectory.append((
-                        state, 
-                        obs, 
+                        critic_dict, 
+                        obs_for_critic[agent], 
                         actor_hidden_states[agent].detach().cpu().numpy(),
                         critic_hidden_states[agent].detach().cpu().numpy(),
                         actions[agent], 
                         rewards[agent], 
-                        next_obs, 
-                        next_obs[agent]
+                        env.observe(agent), 
                     ))
 
                 # Update hidden states
                 actor_hidden_states = next_actor_hidden_states
                 critic_hidden_states = next_critic_hidden_states
-
-                # Update state
-                state = next_obs
                 
                 # Check if all agents are done
                 if all(dones.values()):

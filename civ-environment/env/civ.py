@@ -20,8 +20,8 @@ import math
 # Might change!
 
 class Civilization(AECEnv): 
-    metadata = {'render.modes': ['human'], 'name': 'Civilization_v0'}
-    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, *args, **kwargs):
+    metadata = {'render_modes': ['human'], 'name': 'Civilization_v0'}
+    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', *args, **kwargs):
         """
         Initialize the Civilization game.
         Args:
@@ -38,17 +38,18 @@ class Civilization(AECEnv):
         """
 
         super().__init__()
+        self.agents = [i for i in range(num_agents)]
+        self.possible_agents = self.agents[:]
         if num_agents > 6:
             raise ValueError(
                 f"Number of players ({num_agents}) exceeds the maximum allowed (6)."
             )
-        self.agents = ["player_" + str(i) for i in range(num_agents)]
-        self.possible_agents = self.agents[:]
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.reset()
         self.num_of_agents = num_agents
         self.max_units_per_agent = max_units_per_agent
         self.max_projects = max_projects
+        self.render_mode = render_mode
 
 
         self.map_size = map_size
@@ -57,42 +58,6 @@ class Civilization(AECEnv):
         self.max_cities = max_cities
         # Initialize the observation spaces for each player
         self.visibility_maps = {agent: np.zeros((self.map_height, self.map_width), dtype=bool) for agent in self.agents}
-        self.observation_spaces = {
-                agent: spaces.Dict({
-                    "map": spaces.Box(
-                        low=0, 
-                        high=1, 
-                        shape=(
-                            self.map_height, 
-                            self.map_width, 
-                            self._calculate_num_channels()
-                        ), 
-                        dtype=np.float32
-                    ),
-                    "units": spaces.Box(
-                        low=0,
-                        high=np.inf,
-                        shape=(self.max_units_per_agent, self._calculate_unit_attributes()),
-                        dtype=np.float32
-                    ),
-                    "cities": spaces.Box(
-                        low=0,
-                        high=np.inf,
-                        shape=(
-                            self.max_cities,
-                            self._calculate_city_attributes()
-                        ),
-                        dtype=np.float32
-                    ),
-                    "money": spaces.Box(
-                        low=0,
-                        high=np.inf,
-                        shape=(1,),
-                        dtype=np.float32
-                    )
-                })
-                for agent in self.agents
-            }
         # Hold the units for each player
         self.units = {agent: [] for agent in self.agents}
         # Hold the cities for each player
@@ -113,17 +78,6 @@ class Civilization(AECEnv):
         # unit types
 
         self.UNIT_TYPE_MAPPING = { 'warrior': 0, 'settler' : 1 }
-        # Initialize the action spaces for each player
-        self.action_spaces = {
-            agent: spaces.Dict({
-                "action_type": spaces.Discrete(7),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER
-                "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
-                "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
-                "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
-                "project_id": spaces.Discrete(self.max_projects)       # For ASSIGN_PROJECT
-            })
-            for agent in self.agents
-        }
        
         self.visibility_range = visibility_range
         self._initialize_map()
@@ -168,7 +122,54 @@ class Civilization(AECEnv):
         self.cities_lost = {agent: 0 for agent in self.agents}
         self.cities_captured = {agent: 0 for agent in self.agents}
         self.resources_gained = {agent: 0 for agent in self.agents}
+        self.observation_spaces = {agent : spaces.Dict({
+            "map": spaces.Box(
+                low=0, 
+                high=1, 
+                shape=(
+                    self.map_height, 
+                    self.map_width, 
+                    self._calculate_num_channels()
+                ), 
+                dtype=np.float32
+            ),
+            "units": spaces.Box(
+                low=0,
+                high=np.inf,
+                shape=(self.max_units_per_agent, self._calculate_unit_attributes()),
+                dtype=np.float32
+            ),
+            "cities": spaces.Box(
+                low=0,
+                high=np.inf,
+                shape=(
+                    self.max_cities,
+                    self._calculate_city_attributes()
+                ),
+                dtype=np.float32
+            ),
+            "money": spaces.Box(
+                low=0,
+                high=np.inf,
+                shape=(1,),
+                dtype=np.float32
+            )
+        }) for agent in self.agents}
+        self.action_spaces = {agent : spaces.Dict({
+            "action_type": spaces.Discrete(7),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER
+            "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
+            "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
+            "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
+            "project_id": spaces.Discrete(self.max_projects)       # For ASSIGN_PROJECT
+        }) for agent in self.agents}
     
+    def observation_space(self, agent):
+        return self.observation_spaces[agent]
+
+    # Implement action_space(agent) method
+    def action_space(self, agent):
+        return self.action_spaces[agent]
+
         
     def reward(self, agent, previous_state, current_state): 
         # Calculate differences between current and previous states
@@ -200,6 +201,14 @@ class Civilization(AECEnv):
                   self.k10 * C_resources -
                   self.gamma * E_impact)
         return reward
+    
+    def get_full_masked_map(self): 
+        map_to_return = self.map.copy()
+        for map in self.visibility_maps.values():
+            map_to_return = np.where(map[:, :, np.newaxis], map_to_return, np.zeros_like(map_to_return))
+            #check
+        #print(map_to_return)
+        return map_to_return
 
     def observe(self, agent):
         full_map = self.map.copy()
@@ -1045,26 +1054,27 @@ class Civilization(AECEnv):
                     break
 
     def render(self):
-        """
-        Visualize the current state of the map using Pygame.
-        """
-        for event in pygame.event.get():
-            if event.type == QUIT:
-                pygame.quit()
-                return
+        if self.render_mode == 'human':
+            for event in pygame.event.get():
+                if event.type == QUIT:
+                    pygame.quit()
+                    return
 
-        # Background
-        self.screen.fill((0, 0, 0))  # Black background
+            # Background
+            self.screen.fill((0, 0, 0))  # Black background
 
-        # Draw the grid and elements
-        self._draw_grid()
-        self._draw_elements()
+            # Draw the grid and elements
+            self._draw_grid()
+            self._draw_elements()
 
-        # Overlay visibility
-        self._draw_visibility()
+            # Overlay visibility
+            self._draw_visibility()
 
-        pygame.display.flip()
-        self.clock.tick(60)  # Limit to 60 fps
+            pygame.display.flip()
+            self.clock.tick(60)  # Limit to 60 fps
+        else:
+            # Handle other render modes or do nothing
+            pass
 
     def _draw_visibility(self):
         """
@@ -1224,7 +1234,7 @@ class Civilization(AECEnv):
             points.append((px, py))
         pygame.draw.polygon(self.screen, color, points)
         
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """
         Reset the environment.
         """
