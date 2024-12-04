@@ -36,6 +36,7 @@ def main():
     n_iters = 10
     n_fit_trajectories = 5
     n_sample_trajectories = 5
+    max_steps = 200
 
     # Initialize policies and optimizers
     actor_policies = {}
@@ -76,7 +77,8 @@ def main():
         theta_inits=theta_inits,
         n_iters=n_iters,
         n_fit_trajectories=n_fit_trajectories,
-        n_sample_trajectories=n_sample_trajectories
+        n_sample_trajectories=n_sample_trajectories,
+        max_steps = max_steps
     )
 
     # Train the policies
