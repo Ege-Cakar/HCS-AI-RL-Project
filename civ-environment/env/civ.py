@@ -44,8 +44,8 @@ class Civilization(AECEnv):
             )
         self.agents = ["player_" + str(i) for i in range(num_agents)]
         self.possible_agents = self.agents[:]
-        self.agent_selector = agent_selector(self.agents)
-        self.current_agent = self.agent_selector.reset()
+        self._agent_selector = agent_selector(self.agents)
+        self.agent_selection = self._agent_selector.reset()
         self.num_of_agents = num_agents
         self.max_units_per_agent = max_units_per_agent
         self.max_projects = max_projects
@@ -232,7 +232,7 @@ class Civilization(AECEnv):
         return observation
 
     def step(self, action):
-        agent = self.current_agent
+        agent = self.agent_selection
         prev_state = self._get_state_snapshot(agent)
         self._process_city_projects(agent)
         action_type = action['action_type']
@@ -273,22 +273,28 @@ class Civilization(AECEnv):
         reward = self.reward(agent, prev_state, current_state)
         self.previous_states[agent] = current_state  # Update previous state
 
-        # Check for termination (e.g., only one player remains)
-        active_agents = [agent for agent in self.agents if self.units[agent] or self.cities[agent]] # We only leave agents that have either a city or a unit
+        # Update rewards, dones, infos
+        current_state = self._get_state_snapshot(agent)
+        reward = self.reward(agent, prev_state, current_state)
+        self.rewards[agent] = reward
+
+        # Check for termination
+        active_agents = [agent for agent in self.agents if self.units[agent] or self.cities[agent]]
         done = len(active_agents) <= 1
+        self.dones[agent] = done
 
-        # Prepare observations
-        observation = self.observe(agent)
-
-        # Prepare info
-        info = {}
+        # Remove agent if done
+        if self.dones[agent]:
+            self.agents.remove(agent)
 
         # Advance to the next agent
-        self.current_agent = self.agent_selector.next()
-
+        if self.agents:
+            self._agent_selector.move_to_next()
+            self.agent_selection = self._agent_selector.next()
+        else:
+            self.agent_selection = None
+            print("Game done!")
         #TODO: DO INFO? 
-
-        return observation, reward, done, info
 
     def _get_state_snapshot(self, agent):
         state = {
@@ -1224,10 +1230,14 @@ class Civilization(AECEnv):
         """
 
         self.agents = self.possible_agents[:]
+        self.rewards = {agent: 0 for agent in self.agents}
+        self.dones = {agent: False for agent in self.agents}
+        self.infos = {agent: {} for agent in self.agents}
+        self._agent_selector = agent_selector(self.agents)
+        self.agent_selection = self._agent_selector.reset()
         self.units = {agent: [] for agent in self.agents}
         self.cities = {agent: [] for agent in self.agents}
-        self.agent_selector = agent_selector(self.agents)
-        self.current_agent = self.agent_selector.next()
+        self.gdp_bonus = {agent: 0 for agent in self.agents}
         
         self._initialize_map()
 
