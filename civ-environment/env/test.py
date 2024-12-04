@@ -31,7 +31,7 @@ def main():
     env = wrappers.OrderEnforcingWrapper(env)
 
     # Define hyperparameters
-    hidden_size = 128
+    hidden_size = 256
     lambdaa = 0.01
     n_iters = 10
     n_fit_trajectories = 5

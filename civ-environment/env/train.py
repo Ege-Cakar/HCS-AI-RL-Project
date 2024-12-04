@@ -88,7 +88,8 @@ class ProximalPolicyOptimization:
             for agent_idx, theta in enumerate(theta_list):
                 agent_sample_trajectories = ProximalPolicyOptimization.sample_trajectories( #for a single agent
                     self.env,
-                    self.pi(theta),
+                    self.actor_policies[agent_idx],
+                    self.critic_policies[agent_idx],
                     self.n_sample_trajectories
                 )
                 sample_trajectories_list.append(agent_sample_trajectories)
@@ -136,7 +137,7 @@ class ProximalPolicyOptimization:
                 but one takes into account present state and encoded history in deciding an action
                 and the other takes into account present observation and encoded history in deciding a value estimate for 
         """
-        trajectories = []
+        trajectory_per_agent = []
 
         for _ in range(num_trajectories):
             trajectory = []
@@ -144,58 +145,57 @@ class ProximalPolicyOptimization:
             # Reset environment and get initial state, converted to usable format
             env.reset()
             # Initialize hidden states for actor and critic networks
-            actor_hidden_states = {agent: torch.zeros(1, 1, actor_policy.hidden_size) for agent in env.agents}
-            critic_hidden_states = {agent: torch.zeros(1, 1, critic_policy.hidden_size) for agent in env.agents}
+            actor_hidden_states = torch.zeros(1, 1, actor_policy.hidden_size)
+            critic_hidden_states = torch.zeros(1, 1, critic_policy.hidden_size)
 
             for t in range(max_steps):
                 actions = {}
-                next_actor_hidden_states = {}
-                next_critic_hidden_states = {}
+                next_actor_hidden_states = torch.zeros(1, 1, actor_policy.hidden_size)
+                next_critic_hidden_states = torch.zeros(1, 1, critic_policy.hidden_size)
                 observations = {}
                 rewards = {}
                 next_states = {}
                 dones = {}
                 obs_for_critic = []
 
-                for _ in env.agents:
-                    # Get agent's observation
-                    agent = env.agent_selection
-                    obs = env.observe(agent)
-                    obs_for_critic.append(obs)
-                    for key in obs:
-                        obs[key] = torch.tensor(obs[key], dtype=torch.float32).flatten()
-                    obs_tensor = torch.cat([obs[key] for key in obs]).unsqueeze(0)
-                    
-                    # Actor policy: get action distribution and next hidden state
-                    action_probs, next_actor_hidden = actor_policy(obs_tensor, actor_hidden_states[agent])
-                    
-                    # Sample action components
-                    action_type_dist = Categorical(probs=action_probs['action_type'])
-                    action_type = action_type_dist.sample().item()
+                
+                # Get agent's observation
+                agent = env.agent_selection
+                obs = env.observe(agent)
+                #obs_for_critic.append(obs)
+                for key in obs:
+                    obs[key] = torch.tensor(obs[key], dtype=torch.float32).flatten()
+                obs_tensor = torch.cat([obs[key] for key in obs]).unsqueeze(0)
+                
+                # Actor policy: get action distribution and next hidden state
+                action_probs, next_actor_hidden = actor_policy(obs_tensor, actor_hidden_states)
+                
+                # Sample action components
+                action_type_dist = Categorical(probs=action_probs['action_type'])
+                action_type = action_type_dist.sample().item()
 
-                    unit_id_dist = Categorical(probs=action_probs['unit_id'])
-                    unit_id = unit_id_dist.sample().item()
+                unit_id_dist = Categorical(probs=action_probs['unit_id'])
+                unit_id = unit_id_dist.sample().item()
 
-                    direction_dist = Categorical(probs=action_probs['direction'])
-                    direction = direction_dist.sample().item()
+                direction_dist = Categorical(probs=action_probs['direction'])
+                direction = direction_dist.sample().item()
 
-                    city_id_dist = Categorical(probs=action_probs['city_id'])
-                    city_id = city_id_dist.sample().item()
+                city_id_dist = Categorical(probs=action_probs['city_id'])
+                city_id = city_id_dist.sample().item()
 
-                    project_id_dist = Categorical(probs=action_probs['project_id'])
-                    project_id = project_id_dist.sample().item()
+                project_id_dist = Categorical(probs=action_probs['project_id'])
+                project_id = project_id_dist.sample().item()
 
-                    action = {
-                        'action_type': action_type,
-                        'unit_id': unit_id,
-                        'direction': direction,
-                        'city_id': city_id,
-                        'project_id': project_id,
-                    }
-                    actions[agent] = action
-                    env.step(action)
+                action = {
+                    'action_type': action_type,
+                    'unit_id': unit_id,
+                    'direction': direction,
+                    'city_id': city_id,
+                    'project_id': project_id,
+                }
+                env.step(action)
 
-                    next_actor_hidden_states[agent] = next_actor_hidden
+                next_actor_hidden_states = next_actor_hidden
 
                 
                 # Critic policy: get value estimate and next hidden state
@@ -211,6 +211,8 @@ class ProximalPolicyOptimization:
                 critic_dict['units'] = None
                 critic_dict['cities'] = None
                 critic_dict['money'] = None
+                for agent in env.agents: 
+                    obs_for_critic.append(env.observe(agent))
                 for obs in obs_for_critic:
                     for key in obs:
                         if key != 'map':
@@ -225,24 +227,25 @@ class ProximalPolicyOptimization:
                     critic_dict[key] = torch.tensor(critic_dict[key], dtype=torch.float32).flatten()
                 critic_tensor = torch.cat([critic_dict[key] for key in critic_dict]).unsqueeze(0)    
                 
-                value, next_critic_hidden = critic_policy(critic_tensor, critic_hidden_states[agent])
-                next_critic_hidden_states[agent] = next_critic_hidden
+                print(critic_tensor.shape)
+                print(critic_hidden_states.shape)
+                value, next_critic_hidden = critic_policy(critic_tensor, critic_hidden_states)
+                next_critic_hidden_states = next_critic_hidden
 
                 # Step environment with all actions
-                rewards = env.rewards
-                dones = env.dones
+                reward = env.rewards[agent]
+                done = env.dones[agent]
 
                 # Store the current step in the trajectory
-                for agent in env.agents:
-                    trajectory.append((
-                        critic_dict, 
-                        obs_for_critic[agent], 
-                        actor_hidden_states[agent].detach().cpu().numpy(),
-                        critic_hidden_states[agent].detach().cpu().numpy(),
-                        actions[agent], 
-                        rewards[agent], 
-                        env.observe(agent), 
-                    ))
+                trajectory[agent].append((
+                    critic_dict, 
+                    obs_for_critic[agent], 
+                    actor_hidden_states.detach().cpu().numpy(),
+                    critic_hidden_states.detach().cpu().numpy(),
+                    actions, 
+                    reward, 
+                    env.observe(agent), 
+                ))
 
                 # Update hidden states
                 actor_hidden_states = next_actor_hidden_states
@@ -252,9 +255,9 @@ class ProximalPolicyOptimization:
                 if all(dones.values()):
                     break
 
-            trajectories.append(trajectory)
+            trajectory_per_agent.append(trajectory)
 
-        return trajectories
+        return trajectory_per_agent
 
 
     def fit(trajectories):

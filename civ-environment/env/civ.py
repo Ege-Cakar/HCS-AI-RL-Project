@@ -172,6 +172,9 @@ class Civilization(AECEnv):
 
         
     def reward(self, agent, previous_state, current_state): 
+        if self._states_are_equal(previous_state, current_state):
+            print(f"Agent {agent} performed an action that did not change the state. Penalized with -100.")
+            return -100
         # Calculate differences between current and previous states
         P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
         P_completion = current_state['completed_projects'] - previous_state['completed_projects']
@@ -202,6 +205,32 @@ class Civilization(AECEnv):
                   self.gamma * E_impact)
         return reward
     
+    def _states_are_equal(self, state1, state2):
+        """
+        Compare two states to determine if they are exactly the same.
+
+        Args:
+            state1 (dict): The first state dictionary.
+            state2 (dict): The second state dictionary.
+
+        Returns:
+            bool: True if states are identical, False otherwise.
+        """
+        if state1.keys() != state2.keys():
+            return False
+
+        for key in state1:
+            val1 = state1[key]
+            val2 = state2[key]
+            
+            if isinstance(val1, np.ndarray) and isinstance(val2, np.ndarray):
+                if not np.array_equal(val1, val2):
+                    return False
+            else:
+                if val1 != val2:
+                    return False
+        return True
+        
     def get_full_masked_map(self): 
         map_to_return = self.map.copy()
         for map in self.visibility_maps.values():
@@ -272,7 +301,6 @@ class Civilization(AECEnv):
         # Update money (GDP is money per turn)
         self.money[agent] += self._calculate_gdp(agent)
         current_state = self._get_state_snapshot(agent)
-        reward = self.reward(agent, prev_state, current_state)
         self.previous_states[agent] = current_state  # Update previous state
 
         # Update rewards, dones, infos
@@ -291,7 +319,6 @@ class Civilization(AECEnv):
 
         # Advance to the next agent
         if self.agents:
-            self._agent_selector.move_to_next()
             self.agent_selection = self._agent_selector.next()
         else:
             self.agent_selection = None
@@ -336,32 +363,40 @@ class Civilization(AECEnv):
     def _handle_move_unit(self, agent, action):
         unit_id = action['unit_id']
         direction = action['direction']
-        unit = self.units[agent][unit_id]
-        unit.move(direction)
-        self._update_visibility(agent, unit.x, unit.y)
-    
+        if unit_id not in self.units[agent]: 
+            pass
+        else: 
+            unit = self.units[agent][unit_id]
+            unit.move(direction)
+            self._update_visibility(agent, unit.x, unit.y)
+        
     def _handle_attack_unit(self, agent, action):
         unit_id = action['unit_id']
         direction = action['direction']
-        unit = self.units[agent][unit_id]
-        unit.attack(direction)
-        # TODO: UPDATE THE HEALTH OF THE UNIT ATTACKED
-        # Done within the Unit class now
+        if unit_id not in self.units[agent]:
+            pass
+        else: 
+            unit = self.units[agent][unit_id]
+            unit.attack(direction)
     
 
     def _handle_found_city(self, agent, action):
         unit_id = action['unit_id']
-        unit = self.units[agent][unit_id]
-        if unit.type == 'settler':
-            if unit.found_city():
-                new_city = self.City(unit.x, unit.y, agent, env=self)
-                self.cities[agent].append(new_city)
-                # Remove the settler from the game
-                self.units[agent].remove(unit)
-                # Update the map, visibility, and any other game state
-                self._update_map_with_new_city(agent, new_city)
-            else:
-                pass
+        if unit_id not in self.units[agent]:
+            # Handle invalid unit ID
+            pass
+        else: 
+            unit = self.units[agent][unit_id]
+            if unit.type == 'settler':
+                if unit.found_city():
+                    new_city = self.City(unit.x, unit.y, agent, env=self)
+                    self.cities[agent].append(new_city)
+                    # Remove the settler from the game
+                    self.units[agent].remove(unit)
+                    # Update the map, visibility, and any other game state
+                    self._update_map_with_new_city(agent, new_city)
+                else:
+                    pass
 
     def _handle_assign_project(self, agent, action):
         city_id = action['city_id']
@@ -382,32 +417,40 @@ class Civilization(AECEnv):
             pass
     
     def _handle_buy_warrior(self, agent, city_id):
-        city = self.cities[agent][city_id]
-        cost = self.WARRIOR_COST
-        if self.money[agent] >= cost:
-            self.money[agent] -= cost
-            x, y = city.x, city.y
-            placed = self._place_unit_near_city(agent, 'warrior', x, y)
-            if not placed:
-                # Handle case where no adjacent empty tile is found
-                pass
-        else:
-            # Handle insufficient funds
+        if city_id not in self.cities[agent]:
+            # Handle invalid city ID
             pass
+        else: 
+            city = self.cities[agent][city_id]
+            cost = self.WARRIOR_COST
+            if self.money[agent] >= cost:
+                self.money[agent] -= cost
+                x, y = city.x, city.y
+                placed = self._place_unit_near_city(agent, 'warrior', x, y)
+                if not placed:
+                    # Handle case where no adjacent empty tile is found
+                    pass
+            else:
+                # Handle insufficient funds
+                pass
     
     def _handle_buy_settler(self, agent, city_id):
-        city = self.cities[agent][city_id]
-        cost = self.SETTLER_COST
-        if self.money[agent] >= cost:
-            self.money[agent] -= cost
-            x, y = city.x, city.y
-            placed = self._place_unit_near_city(agent, 'settler', x, y)
-            if not placed:
-                # Handle case where no adjacent empty tile is found
-                pass
-        else:
-            # Handle insufficient funds
+        if city_id not in self.cities[agent]:    
+            # Handle invalid city ID
             pass
+        else:
+            city = self.cities[agent][city_id]
+            cost = self.SETTLER_COST
+            if self.money[agent] >= cost:
+                self.money[agent] -= cost
+                x, y = city.x, city.y
+                placed = self._place_unit_near_city(agent, 'settler', x, y)
+                if not placed:
+                    # Handle case where no adjacent empty tile is found
+                    pass
+            else:
+                # Handle insufficient funds
+                pass
 
     class Unit:
         def __init__(self, x, y, unit_type, owner, env):
