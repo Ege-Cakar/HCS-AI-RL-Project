@@ -33,10 +33,11 @@ def main():
     # Define hyperparameters
     hidden_size = 1024
     lambdaa = 0.01
-    n_iters = 10000
-    n_fit_trajectories = 1000
-    n_sample_trajectories = 1000
-    max_steps = 50 #TO CHANGE
+    n_iters = 1000
+    n_fit_trajectories = 100
+    n_sample_trajectories = 100
+    max_steps = 30 #TO CHANGE
+    num_epochs = 100
 
     # Initialize policies and optimizers
     actor_policies = {}

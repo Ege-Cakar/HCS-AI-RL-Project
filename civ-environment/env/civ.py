@@ -173,8 +173,9 @@ class Civilization(AECEnv):
         
     def reward(self, agent, previous_state, current_state): 
         if self._states_are_equal(previous_state, current_state):
-            print(f"Agent {agent} performed an action that did not change the state. Penalized with -100.")
-            return -100
+            #print(f"Agent {agent} performed an action that did not change the state. Penalized with -10.")
+            #Spams too much. Comment it out for now.
+            return -10
         # Calculate differences between current and previous states
         P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
         P_completion = current_state['completed_projects'] - previous_state['completed_projects']
@@ -341,7 +342,7 @@ class Civilization(AECEnv):
     
     def _calculate_gdp(self, agent):
         # Maybe a linear combination of units and cities owned? 
-        gdp = len(self.cities[agent]) * 2 + len(self.units[agent]) * 1 + self.gdp_bonus[agent]
+        gdp = len(self.cities[agent]) * 2 + self.gdp_bonus[agent] # + len(self.units[agent]) * 1 
         # add a factor for the resources controlled?
         # maybe slight randomness? would that help? 
         return gdp
@@ -1112,7 +1113,6 @@ class Civilization(AECEnv):
             pygame.display.flip()
             self.clock.tick(60)  # Limit to 60 fps
         else:
-            # Handle other render modes or do nothing
             pass
 
     def _draw_visibility(self):
@@ -1321,7 +1321,7 @@ class Civilization(AECEnv):
 
 # Testing 
 if __name__ == "__main__":
-    map_size = (15, 30) 
+    map_size = (20, 30) 
     num_agents = 4        
     env = Civilization(map_size, num_agents)
     env.reset()

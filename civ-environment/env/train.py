@@ -79,7 +79,7 @@ class ProximalPolicyOptimization:
         #This code is taken from class
         theta_list = self.theta_inits
 
-        for _ in tqdm(range(self.n_iters), desc="Training Iterations"):
+        for iter in tqdm(range(self.n_iters), desc="Training Iterations"):
             n_agents = len(self.actor_policies)
 
             trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies, n_agents)
@@ -99,104 +99,107 @@ class ProximalPolicyOptimization:
                 trajectories[agent_idx].extend(trajectories_next_step)
 
 
-        # Process trajectories
-        states = torch.stack([t[0] for t in trajectories])  # States
-        obs = torch.stack([self.flatten_observation(t[1]) for t in trajectories])
-        actions = torch.stack([t[4] for t in trajectories])  # Actions
-        rewards = torch.tensor([t[5] for t in trajectories], dtype=torch.float32)  # Rewards
-        next_states = torch.stack([t[6] for t in trajectories])  # Next states
-        
+            # Process trajectories
+            states = torch.stack([t[0] for t in trajectories])  # States
+            obs = torch.stack([self.flatten_observation(t[1]) for t in trajectories])
+            actions = torch.stack([t[4] for t in trajectories])  # Actions
+            rewards = torch.tensor([t[5] for t in trajectories], dtype=torch.float32)  # Rewards
+            next_states = torch.stack([t[6] for t in trajectories])  # Next states
+            
 
-        # Compute returns (discounted rewards-to-go)
-        returns = self.compute_returns(rewards)
+            # Compute returns (discounted rewards-to-go)
+            returns = self.compute_returns(rewards)
 
-        # Compute values from critic
-        values = []
-        for agent, critic_policy in self.critic_policies.items():
-            agent_states = states[agent]  # Assuming `states` is a dictionary or can be indexed by `agent`
-            value, _ = critic_policy(agent_states, None)  # Pass the states for the specific agent
-            values.append(value)
+            # Compute values from critic
+            values = []
+            for agent, critic_policy in self.critic_policies.items():
+                agent_states = states[agent]  # Assuming `states` is a dictionary or can be indexed by `agent`
+                value, _ = critic_policy(agent_states, None)  # Pass the states for the specific agent
+                values.append(value)
 
-        values = torch.stack(values)  # Combine the values for all agents
-        values = values.squeeze()
+            values = torch.stack(values)  # Combine the values for all agents
+            values = values.squeeze()
 
-        # Compute advantages (returns - values)
-        advantages = returns - values.detach()
+            # Compute advantages (returns - values)
+            advantages = returns - values.detach()
 
-        # Actor update: Policy gradient loss
-        action_probs = []
-        log_probs = []
-        actions = []
+            # Actor update: Policy gradient loss
+            action_probs = []
+            log_probs = []
+            actions = []
 
-        for agent, actor_policy in self.actor_policies.items():
-            agent_obs = obs[agent]  # Assuming `obs` is indexed by agent
-            agent_obs = ActorRNN.process_observation(agent_obs)
-            action_prob, _ = actor_policy(agent_obs, None)  # Pass reshaped observation to RNN
+            for agent, actor_policy in self.actor_policies.items():
+                agent_obs = obs[agent]  # Assuming `obs` is indexed by agent
+                agent_obs = ActorRNN.process_observation(agent_obs)
+                action_prob, _ = actor_policy(agent_obs, None)  # Pass reshaped observation to RNN
 
-            # Sample actions and compute log probabilities
-            action_type_dist = Categorical(probs=action_prob['action_type'])
-            action_type = action_type_dist.sample().item()  # Sampled action
-            action_type_log_prob = action_type_dist.log_prob(torch.tensor(action_type))  # Log prob of sampled action
+                # Sample actions and compute log probabilities
+                action_type_dist = Categorical(probs=action_prob['action_type'])
+                action_type = action_type_dist.sample().item()  # Sampled action
+                action_type_log_prob = action_type_dist.log_prob(torch.tensor(action_type))  # Log prob of sampled action
 
-            unit_id_dist = Categorical(probs=action_prob['unit_id'])
-            unit_id = unit_id_dist.sample().item()
-            unit_id_log_prob = unit_id_dist.log_prob(torch.tensor(unit_id))
+                unit_id_dist = Categorical(probs=action_prob['unit_id'])
+                unit_id = unit_id_dist.sample().item()
+                unit_id_log_prob = unit_id_dist.log_prob(torch.tensor(unit_id))
 
-            direction_dist = Categorical(probs=action_prob['direction'])
-            direction = direction_dist.sample().item()
-            direction_log_prob = direction_dist.log_prob(torch.tensor(direction))
+                direction_dist = Categorical(probs=action_prob['direction'])
+                direction = direction_dist.sample().item()
+                direction_log_prob = direction_dist.log_prob(torch.tensor(direction))
 
-            city_id_dist = Categorical(probs=action_prob['city_id'])
-            city_id = city_id_dist.sample().item()
-            city_id_log_prob = city_id_dist.log_prob(torch.tensor(city_id))
+                city_id_dist = Categorical(probs=action_prob['city_id'])
+                city_id = city_id_dist.sample().item()
+                city_id_log_prob = city_id_dist.log_prob(torch.tensor(city_id))
 
-            project_id_dist = Categorical(probs=action_prob['project_id'])
-            project_id = project_id_dist.sample().item()
-            project_id_log_prob = project_id_dist.log_prob(torch.tensor(project_id))
+                project_id_dist = Categorical(probs=action_prob['project_id'])
+                project_id = project_id_dist.sample().item()
+                project_id_log_prob = project_id_dist.log_prob(torch.tensor(project_id))
 
-            # Store sampled actions
-            actions.append({
-                'action_type': action_type,
-                'unit_id': unit_id,
-                'direction': direction,
-                'city_id': city_id,
-                'project_id': project_id
-            })
+                # Store sampled actions
+                actions.append({
+                    'action_type': action_type,
+                    'unit_id': unit_id,
+                    'direction': direction,
+                    'city_id': city_id,
+                    'project_id': project_id
+                })
 
-            # Sum log probabilities for all action types
-            total_log_prob = (action_type_log_prob +
-                            unit_id_log_prob +
-                            direction_log_prob +
-                            city_id_log_prob +
-                            project_id_log_prob)
+                # Sum log probabilities for all action types
+                total_log_prob = (action_type_log_prob +
+                                unit_id_log_prob +
+                                direction_log_prob +
+                                city_id_log_prob +
+                                project_id_log_prob)
 
-            log_probs.append(total_log_prob)
+                log_probs.append(total_log_prob)
 
-        # Combine log probabilities into a single tensor
-        log_probs = torch.stack(log_probs)
+            # Combine log probabilities into a single tensor
+            log_probs = torch.stack(log_probs)
 
-        actor_loss = -(log_probs * advantages).mean()  # Policy gradient loss
+            actor_loss = -(log_probs * advantages).mean()  # Policy gradient loss
 
-        # Zero out gradients for all actor optimizers
-        for optimizer in actor_optimizers.values():
-            optimizer.zero_grad()
-        
-        actor_loss.backward()
+            # Zero out gradients for all actor optimizers
+            for optimizer in actor_optimizers.values():
+                optimizer.zero_grad()
+            
+            actor_loss.backward()
 
-        for optimizer in actor_optimizers.values():
-            optimizer.step()
+            for optimizer in actor_optimizers.values():
+                optimizer.step()
 
-        # Critic update: MSE loss
-        critic_loss = F.mse_loss(values, returns)
+            # Critic update: MSE loss
+            critic_loss = F.mse_loss(values, returns)
 
-        # Zero out gradients for all actor optimizers
-        for optimizer in critic_optimizers.values():
-            optimizer.zero_grad()
-        
-        critic_loss.backward()
-        
-        for optimizer in critic_optimizers.values():
-            optimizer.step()
+            # Zero out gradients for all actor optimizers
+            for optimizer in critic_optimizers.values():
+                optimizer.zero_grad()
+            
+            critic_loss.backward()
+            
+            for optimizer in critic_optimizers.values():
+                optimizer.step()
+            
+            if iter % 10 == 0:
+                print(f"Iteration {iter}: Actor Loss: {actor_loss.item()}, Critic Loss: {critic_loss.item()}")
 
         return actor_loss.item(), critic_loss.item()
 
