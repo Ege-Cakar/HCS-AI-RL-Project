@@ -329,7 +329,7 @@ class Civilization(AECEnv):
     def _get_state_snapshot(self, agent):
         state = {
             'projects_in_progress': len([city for city in self.cities[agent] if city.current_project is not None]),
-            'completed_projects': sum(city.completed_projects for city in self.cities[agent]), 
+            'completed_projects': sum(sum( project for project in city.completed_projects) for city in self.cities[agent]), 
             'explored_tiles': np.sum(self.visibility_maps[agent]), 
             'cities_owned': len(self.cities[agent]),
             'units_owned': len(self.units[agent]),
@@ -364,7 +364,7 @@ class Civilization(AECEnv):
     def _handle_move_unit(self, agent, action):
         unit_id = action['unit_id']
         direction = action['direction']
-        if unit_id not in self.units[agent]: 
+        if unit_id < 0 or unit_id >= len(self.units[agent]):
             pass
         else: 
             unit = self.units[agent][unit_id]
@@ -374,7 +374,7 @@ class Civilization(AECEnv):
     def _handle_attack_unit(self, agent, action):
         unit_id = action['unit_id']
         direction = action['direction']
-        if unit_id not in self.units[agent]:
+        if unit_id < 0 or unit_id >= len(self.units[agent]):
             pass
         else: 
             unit = self.units[agent][unit_id]
@@ -383,7 +383,7 @@ class Civilization(AECEnv):
 
     def _handle_found_city(self, agent, action):
         unit_id = action['unit_id']
-        if unit_id not in self.units[agent]:
+        if unit_id < 0 or unit_id >= len(self.units[agent]):
             # Handle invalid unit ID
             pass
         else: 
@@ -402,7 +402,7 @@ class Civilization(AECEnv):
     def _handle_assign_project(self, agent, action):
         city_id = action['city_id']
         project_id = action['project_id']
-        if city_id in self.cities[agent]:
+        if city_id>=0 and city_id < len(self.cities[agent]):
             city = self.cities[agent][city_id]
             if city.current_project is None:
                 project = self.projects.get(project_id, None)
@@ -418,7 +418,7 @@ class Civilization(AECEnv):
             pass
     
     def _handle_buy_warrior(self, agent, city_id):
-        if city_id not in self.cities[agent]:
+        if city_id < 0 or city_id >= len(self.cities[agent]):
             # Handle invalid city ID
             pass
         else: 
@@ -436,7 +436,7 @@ class Civilization(AECEnv):
                 pass
     
     def _handle_buy_settler(self, agent, city_id):
-        if city_id not in self.cities[agent]:    
+        if city_id < 0 or city_id >= len(self.cities[agent]):
             # Handle invalid city ID
             pass
         else:
@@ -692,12 +692,12 @@ class Civilization(AECEnv):
             self.x = x
             self.y = y
             self.health = 100
+            self.env = env
             self.resources = self._get_resources()
-            self.finished_projects = [0 for _ in range(self.max_projects)]
+            self.completed_projects = [0 for _ in range(self.env.max_projects)]
             self.current_project = None
             self.project_duration = 0
             self.owner = owner
-            self.env = env
 
         def _get_resources(self):
             """
@@ -813,8 +813,7 @@ class Civilization(AECEnv):
                 city.resources.get('material', 0),  # Material
                 city.resources.get('water', 0),      # Water
             ]
-            finished_projects = [0] * self.max_projects
-            finished_projects[:city.completed_projects] = [1] * city.completed_projects
+            finished_projects = city.completed_projects
             city_data.extend(finished_projects)
             city_data.append(city.current_project if city.current_project is not None else -1)
             city_data.append(city.project_duration)
@@ -1111,7 +1110,7 @@ class Civilization(AECEnv):
             self._draw_visibility()
 
             pygame.display.flip()
-            self.clock.tick(60)  # Limit to 60 fps
+            self.clock.tick(120)  # Limit to 60 fps
         else:
             pass
 

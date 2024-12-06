@@ -83,7 +83,7 @@ def main():
     )
 
     # Train the policies
-    ppo.train()
+    ppo.train(eval_interval=1, eval_steps=20)
 
 if __name__ == "__main__":
     main()

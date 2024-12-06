@@ -50,7 +50,7 @@ class ProximalPolicyOptimization:
         self.n_sample_trajectories = n_sample_trajectories
         self.max_steps = max_steps
 
-    def train(self):
+    def train(self, eval_interval=10, eval_steps=20):
         """
         Proximal Policy Optimization (PPO) implementation.
 
@@ -81,11 +81,11 @@ class ProximalPolicyOptimization:
 
         for iter in tqdm(range(self.n_iters), desc="Training Iterations"):
             n_agents = len(self.actor_policies)
-
+            self.env.reset()   
+            
             trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies, n_agents)
 
             for step in range(self.max_steps):
-
                 for agent_idx in range(n_agents):
                     #print("On agent", agent_idx)
                     agent = self.env.agent_selection                
@@ -200,6 +200,25 @@ class ProximalPolicyOptimization:
             
             if iter % 10 == 0:
                 print(f"Iteration {iter}: Actor Loss: {actor_loss.item()}, Critic Loss: {critic_loss.item()}")
+            if (iter + 1) % eval_interval == 0:
+                self.env.reset()
+                for step in range(eval_steps):
+                    print(f"Step {step}")
+                    for agent in self.env.agent_iter():
+                        print(f"Agent {agent}")
+                        # sample action
+                        # Get the current agent's observation
+                        observation = self.env.observe(agent)
+                        obs_tensor = ActorRNN.process_observation(observation)
+
+                        # Get action probabilities from the actor policy
+                        with torch.no_grad():
+                            action_probs, _ = self.actor_policies[agent](obs_tensor, None)
+
+                        # Sample action from probabilities
+                        chosen_action = ProximalPolicyOptimization.sample_action(action_probs)
+                        self.env.step(chosen_action)
+                        self.env.render()
 
         return actor_loss.item(), critic_loss.item()
 
