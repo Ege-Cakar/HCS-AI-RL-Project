@@ -396,6 +396,7 @@ class Civilization(AECEnv):
                     self.units[agent].remove(unit)
                     # Update the map, visibility, and any other game state
                     self._update_map_with_new_city(agent, new_city)
+                    print(f"Agent {agent} founded a city at ({unit.x}, {unit.y})!")
                 else:
                     pass
 
@@ -410,9 +411,9 @@ class Civilization(AECEnv):
                     city.current_project = project_id
                     city.project_duration = project['duration']
                 else:
-                    raise ValueError(f"Invalid project ID: {project_id}")
+                    pass
             else:
-                raise ValueError(f"City {city_id} is already working on a project.")
+                pass
         else: 
             # Handle invalid city ID
             pass
@@ -692,6 +693,7 @@ class Civilization(AECEnv):
             self.x = x
             self.y = y
             self.health = 100
+            self.type = "City"
             self.env = env
             self.resources = self._get_resources()
             self.completed_projects = [0 for _ in range(self.env.max_projects)]
@@ -997,7 +999,7 @@ class Civilization(AECEnv):
         """
         unit_types = {'city': 0, 'warrior': 1, 'settler': 2}
         if unit_type not in unit_types:
-            raise ValueError(f"Invalid unit type: {unit_type}") #no typos!
+            pass  # Handle invalid unit type
         unit_channel = self.num_of_agents + (3 * agent_idx) + unit_types[unit_type]
         self.map[y, x, unit_channel] = 1
         # Create a Unit instance and add it to the agent's unit list
@@ -1048,17 +1050,27 @@ class Civilization(AECEnv):
             if not placed:
                 pass
         elif project['type'] == 'friendly':
-            gdp_boost = project.get('gdp_boost', 0)
-            penalty = project.get('penalty', 0)
-            self._apply_gdp_boost(agent, gdp_boost)
-            self._apply_penalty(agent, penalty)
+            if city.completed_projects[project_id] == 0:
+                city.completed_projects[project_id] = 1
+                gdp_boost = project.get('gdp_boost', 0)
+                penalty = project.get('penalty', 0)
+                self._apply_gdp_boost(agent, gdp_boost)
+                self._apply_penalty(agent, penalty)
+            else:
+                pass
+            #TODO: MIGHT BE PROBLEMATIC IF THEY TRY TO COMPLETE THE SAME PROJECTS OVER AND OVER
+
         elif project['type'] == 'destructive':
-            gdp_boost = project.get('gdp_boost', 0)
-            penalty = project.get('penalty', 0)
-            self._apply_gdp_boost(agent, gdp_boost)
-            self._apply_penalty(agent, penalty)
-            self._destroy_resource_in_city_tiles(agent, city)
-        city.completed_projects += 1
+            if city.completed_projects[project_id] == 0:
+                city.completed_projects[project_id] = 1
+                gdp_boost = project.get('gdp_boost', 0)
+                penalty = project.get('penalty', 0)
+                self._apply_gdp_boost(agent, gdp_boost)
+                self._apply_penalty(agent, penalty)
+                self._destroy_resource_in_city_tiles(agent, city)
+            else:
+                pass
+            #TODO: MIGHT BE PROBLEMATIC IF THEY TRY TO COMPLETE THE SAME PROJECTS OVER AND OVER
 
     def _apply_gdp_boost(self, agent, amount):
         self.gdp_bonus[agent] += amount

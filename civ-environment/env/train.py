@@ -203,9 +203,7 @@ class ProximalPolicyOptimization:
             if (iter + 1) % eval_interval == 0:
                 self.env.reset()
                 for step in range(eval_steps):
-                    print(f"Step {step}")
                     for agent in self.env.agent_iter():
-                        print(f"Agent {agent}")
                         # sample action
                         # Get the current agent's observation
                         observation = self.env.observe(agent)
