@@ -33,11 +33,14 @@ def main():
     # Define hyperparameters
     hidden_size = 1024
     lambdaa = 0.01
-    n_iters = 1000
+    n_iters = 5 #number of training iterations
     n_fit_trajectories = 100
     n_sample_trajectories = 100
-    max_steps = 30 #TO CHANGE
+    max_steps = 100 #number of steps in trajectory
     num_epochs = 100
+    eval_interval=5
+    eval_steps=100 #number of steps to run civ game for
+    batch_size = 64  # Define your batch size
 
     # Initialize policies and optimizers
     actor_policies = {}
@@ -66,16 +69,12 @@ def main():
         actor_policies[agent] = ActorRNN(input_size, hidden_size, action_size, env.max_cities, env.max_projects)
         critic_policies[agent] = CriticRNN(input_size_critic, hidden_size)
 
-        # Initialize policy parameters
-        theta_inits[agent] = np.random.randn(sum(p.numel() for p in actor_policies[agent].parameters()))
-
     # Instantiate PPO
     ppo = ProximalPolicyOptimization(
         env=env,
         actor_policies=actor_policies,
         critic_policies=critic_policies,
         lambdaa=lambdaa,
-        theta_inits=theta_inits,
         n_iters=n_iters,
         n_fit_trajectories=n_fit_trajectories,
         n_sample_trajectories=n_sample_trajectories,
@@ -83,7 +82,7 @@ def main():
     )
 
     # Train the policies
-    ppo.train(eval_interval=1, eval_steps=20)
+    ppo.train(eval_interval, eval_steps)
 
 if __name__ == "__main__":
     main()

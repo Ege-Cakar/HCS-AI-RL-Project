@@ -396,7 +396,7 @@ class Civilization(AECEnv):
                     self.units[agent].remove(unit)
                     # Update the map, visibility, and any other game state
                     self._update_map_with_new_city(agent, new_city)
-                    print(f"Agent {agent} founded a city at ({unit.x}, {unit.y})!")
+                    #print(f"Agent {agent} founded a city at ({unit.x}, {unit.y})!")
                 else:
                     pass
 
@@ -482,7 +482,7 @@ class Civilization(AECEnv):
 
         def attack(self, direction):
             if self.type != 'warrior':
-                print(f"Unit {self} is not a warrior and cannot attack.")
+                #print(f"Unit {self} is not a warrior and cannot attack.")
                 return
 
             target_agent, target = self._check_enemy_units_and_cities(self.x, self.y, direction, self.owner, self.env)
@@ -508,8 +508,8 @@ class Civilization(AECEnv):
                         self.env.cities_captured[self.owner] += 1
                         self.env.cities_lost[target.owner] += 1
             else:
-                print(f"No enemy to attack in direction {direction} from ({self.x}, {self.y}).")
-
+                #print(f"No enemy to attack in direction {direction} from ({self.x}, {self.y}).")
+                pass
         
         # TODO: Maybe add defending? 
         
@@ -895,8 +895,9 @@ class Civilization(AECEnv):
                     break
             if not warrior_placed:
                 # Handle the case where no adjacent empty tile is found
-                print(f"Warning: Could not place warrior for agent {agent_idx} adjacent to settler at ({x}, {y}).")
+                #print(f"Warning: Could not place warrior for agent {agent_idx} adjacent to settler at ({x}, {y}).")
                # Optionally, expand search radius
+               pass
 
     
     def _is_tile_empty(self, x, y):
