@@ -19,6 +19,8 @@ from typing import TypeVar, Callable
 import jax.numpy as jnp
 import torch.nn.functional as F
 from tqdm import tqdm
+import random
+from rnn import ActorRNN, CriticRNN
 
 
 from civ import Civilization
@@ -28,7 +30,7 @@ State = TypeVar("State")  # Represents the state type
 Action = TypeVar("Action")  # Represents the action type
 
 class ProximalPolicyOptimization:
-    def __init__(self, env, actor_policies, critic_policies, lambdaa, n_iters, n_fit_trajectories, n_sample_trajectories, max_steps):
+    def __init__(self, env, actor_policies, critic_policies, lambdaa, step_max, n_fit_trajectories, n_sample_trajectories, T, batch_size, K):
         """
         Initialize PPO with environment and hyperparameters.
 
@@ -37,19 +39,21 @@ class ProximalPolicyOptimization:
             pi: Policy function that maps parameters to a function defining action probabilities.
             lambdaa: Regularization coefficient.
             theta_init: Initial policy parameters.
-            n_iters: Number of training iterations.
+            step_max: Number of training iterations.
             n_fit_trajectories: Number of trajectories for fitting the advantage function.
             n_sample_trajectories: Number of trajectories for optimizing the policy.
-            max_steps: Number of iterations to run trajectory for
+            T: Number of iterations to run trajectory for
         """
         self.env = env
         self.actor_policies = actor_policies
         self.critic_policies = critic_policies 
         self.lambdaa = lambdaa
-        self.n_iters = n_iters
+        self.step_max = step_max
         self.n_fit_trajectories = n_fit_trajectories
         self.n_sample_trajectories = n_sample_trajectories
-        self.max_steps = max_steps
+        self.T = T
+        self.batch_size = batch_size
+        self.K = K
 
 
     def train(self, eval_interval, eval_steps):
@@ -62,13 +66,15 @@ class ProximalPolicyOptimization:
             critic_policies: RNN defined in test.py
             λ: Regularization coefficient to penalize large changes in the policy.
             theta_inits: Initial parameters of the policy, conists of k1 through k10 and epsilon (environmental impact)
-            n_iters: Number of training iterations.
+            step_max: Number of training iterations.
             n_fit_trajectories: Number of trajectories to collect for fitting the advantage function.
             n_sample_trajectories: Number of trajectories to collect for optimizing the policy.
         
         Returns:
             Trained policy parameters, theta.
         """
+        
+        #each agent in the environment is assigned a separate optimizer for both their actor policy and critic policy networks.
         actor_optimizers = {
             agent: torch.optim.Adam(policy.parameters(), lr=1e-3)
             for agent, policy in self.actor_policies.items()
@@ -78,163 +84,100 @@ class ProximalPolicyOptimization:
             agent: torch.optim.Adam(policy.parameters(), lr=1e-3)
             for agent, policy in self.critic_policies.items()
         }
-        cumulative_rewards = np.zeros((len(self.env.agents), self.n_iters)) # List to store cumulative rewards per iteration
 
+        cumulative_rewards = np.zeros((len(self.env.agents), self.step_max)) # List to store cumulative rewards per iteration
 
-        for iter in range(self.n_iters):
-            print(f"Training iteration: {iter}")
+        for step in range(self.step_max):
+            print(f"Training iteration: {step}")
             sys.stdout.flush()
 
-            self.env.reset()   
-            
-            trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies, len(self.env.agents))
+            D = []
 
-            step=0
-            while step<self.max_steps:
-                sys.stdout.flush()
-                for agent in self.env.agent_iter():
-                    sys.stdout.flush()
-                    trajectories_next_step = self.sample_trajectories( #for a single agent
-                        self.env,
-                        self.actor_policies[agent],
-                        self.critic_policies[agent],
-                        trajectories[agent],
-                        iter,
-                        agent
-                    )
-                    cumulative_rewards[agent, iter]+=trajectories_next_step[-3]
-                    step+=1
-                    if step >= self.max_steps*len(self.env.agents):
-                        break
-                trajectories[agent].extend(trajectories_next_step)
+            for i in range(self.batch_size):
+
+                self.env.reset()   
                 
-            # Process trajectories
-            states = torch.stack([t[0] for t in trajectories])  # States
-            obs = torch.stack([self.flatten_observation(t[1]) for t in trajectories])
-            actions = torch.stack([t[4] for t in trajectories])  # Actions
-            rewards = torch.tensor([t[5] for t in trajectories], dtype=torch.float32)  # Rewards
-            returns = self.compute_returns(rewards)  # Compute discounted rewards-to-go
+                trajectories, cumulative_rewards = self.generate_all_trajectories(cumulative_rewards, step)
+                    
+                D.append(trajectories)
 
-            actor_losses, critic_losses=[],[]
-
-            for agent in self.env.agents:
-                # Compute values using critic
-                critic_policy = self.critic_policies[agent]
-                agent_states = states[agent]
-                values, _ = critic_policy(agent_states, None)
+                old_action_probs = self.compute_old_action_probs(trajectories)
 
                 # Compute advantages
-                advantages = returns - values.detach()
+                A_hat = self.fit(trajectories)
 
-                # Actor update
-                actor_policy = self.actor_policies[agent]
-                action_probs, _ = actor_policy(ActorRNN.process_observation(obs[agent]), None)
+                D.append(trajectories)
 
-                # Compute log probabilities and sample actions
-                total_log_prob = 0  # To accumulate log probabilities for the entire action
-                for key, probs in action_probs.items():
-                    dist = Categorical(probs=probs)  # Create a categorical distribution for this component
-                    sampled_action = dist.sample()  # Sample an action
-                    log_prob = dist.log_prob(sampled_action)  # Get log probability of the sampled action
-                    total_log_prob += log_prob  # Accumulate log probabilities
+            for minibatch in range(self.K): #for now, just a single trajectory
+                random_mini_batch = random.choice(D) #TO CHANGE: mini batch is 1 rn
 
-                # Clipped PPO Objective
-                ratios = torch.exp(total_log_prob - total_log_prob.detach())
-                clipped_ratios = torch.clamp(ratios, 1 - 0.2, 1 + 0.2)
-                actor_loss = -torch.min(ratios * advantages, clipped_ratios * advantages).mean()
+                chunk_size = 45 # TO CHANGE: just doing every 5 time steps
 
-                actor_optimizers[agent].zero_grad()
-                actor_loss.backward()
-                actor_optimizers[agent].step()
+                data_chunks = [random_mini_batch[i:i+chunk_size] for i in range(0, len(random_mini_batch), chunk_size)]
 
-                actor_losses.append(actor_loss.item())
+                actor_hiddens = random_mini_batch[:, 2]  # Actor hidden from first step of trajectory
+                critic_hiddens = random_mini_batch[:, 3] # Critic hidden from first step of trajectory
 
-                # Critic update
-                critic_loss = F.mse_loss(values, returns)
-                critic_optimizers[agent].zero_grad()
-                critic_loss.backward()
-                critic_optimizers[agent].step()
+                for data_chunk in data_chunks:
+                    # update RNN hidden states for π and V from first hidden state in data chunk and propagate
+                    probs, actor_hiddens, values,critic_hiddens= self.updateRNN(data_chunk, actor_hiddens, critic_hiddens)
 
-                critic_losses.append(critic_loss.item())
+            # ACTOR LOSS UPDATES
+            self.actor_adam(trajectories, actor_optimizers, old_action_probs, probs, A_hat)
+            self.critic_adam(trajectories, critic_optimizers, critic_hiddens)
 
-            # Evaluation
-            if (iter + 1) % eval_interval == 0:
-                self.env.reset()
-                step = 0
-                
-                for agent in self.env.agent_iter():
-                    print("Step", step)
-                    sys.stdout.flush()
-                    # Observe and select action
-                    observation = self.env.observe(agent)
-                    obs_tensor = ActorRNN.process_observation(observation)
-                    with torch.no_grad():
-                        action_probs, _ = self.actor_policies[agent](obs_tensor, None)
-                        chosen_action = self.sample_action(action_probs)
-                    self.env.step(chosen_action)
-                    self.env.render()
-
-                    if agent == self.env.agents[-1]:  # Check if this is the last agent for the step
-                        step += 1
-                    if step >= eval_steps:
-                        break
-
-
+            self.evaluate(step, eval_interval, eval_steps)
 
         plt.figure(figsize=(10, 6))
         for agent in range(len(self.env.agents)):
-            plt.plot(range(self.n_iters), cumulative_rewards[agent, :], label=f"Agent {agent + 1}")
+            plt.plot(range(self.step_max), cumulative_rewards[agent, :], label=f"Agent {agent + 1}")
         plt.xlabel("Training Iterations")
         plt.ylabel("Cumulative Reward")
         plt.title("Cumulative Reward Over Training Iterations")
         plt.legend()
         plt.grid()
         plt.show()
-        return actor_losses[-1], critic_losses[-1]
+        return None
     
-    def sample_trajectories(self,env,actor_policy,critic_policy,past_trajectory,iter,agent):
-        """
-        Based off of Yu et al.'s 2022 paper on Recurrent MAPPO.
-        Collect trajectories by interacting with the environment using recurrent actor and critic networks.
+    def generate_all_trajectories(self, cumulative_rewards, step):
+        trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies)
 
-        Args:
-            env: The environment to interact with.
-            actor_policies: A dictionary mapping each agent to its actor policy function.
-            critic_policies: A dictionary mapping each agent to its critic function.
-            past_trajectory: The past trajectory for this agent
-
-        Returns:
-            List of trajectories. Each trajectory is a list of tuples containing:
-                                                            
-            current local observation                 ->  agent's policy ->  probability distribution over actions     ->    action
-            actor hidden RNN from previous time step                         actor hidden RNN for current time step
-
-            current state                             ->  value function  -> value estimate for agent
-            critic hidden RNN from previous time step                        critic hidden RNN for current time step
-
-            accumulate trajectory into:
-            T = (state, obs, actor_hidden_state, critic_hidden_state, action, reward, next_state, next_observation).
-
-            state vs observation: what is observed by all agents vs what is observed by a single agent
-            actor hidden state vs critic hidden state: hidden state of an RNN, 
-                but one takes into account present state and encoded history in deciding an action
-                and the other takes into account present observation and encoded history in deciding a value estimate for 
-        """
-               
-
+        t=0
+        while t<self.T:
+            sys.stdout.flush()
+            for agent in self.env.agent_iter():
+                sys.stdout.flush()
+                trajectories_next_step = self.generate_single_trajectory( #for a single agent
+                    self.env,
+                    self.actor_policies[agent],
+                    self.critic_policies[agent],
+                    trajectories[agent],
+                    agent
+                )
+                cumulative_rewards[agent, step]+=trajectories_next_step[-4]
+                t+=1
+                if t >= self.T*len(self.env.agents):
+                    break
+            trajectories[agent].extend(trajectories_next_step)
+            #shape: # agents x length of trajectory
+            return trajectories,cumulative_rewards
+    
+    def generate_single_trajectory(self,env,actor_policy,critic_policy,past_trajectory,agent):
+            
         trajectories_next_step=[] #ends up being a list of num_agents length, where each element is what gets added to existing trajectory     
         
         #past_trajectory's last elements include state, obs, hidden actor, hidden critic, action, reward next time step, state next time step, obs next time step
-        actor_hidden_state = past_trajectory[-6] 
-        critic_hidden_state = past_trajectory[-5]
-        state_t = past_trajectory[-2]
-        obs_t = past_trajectory[-1]
+        actor_hidden_state = past_trajectory[-7] 
+        critic_hidden_state = past_trajectory[-6]
+        state_t = past_trajectory[-3]
+        obs_t = past_trajectory[-2]
+        # Prepare inputs for RNNs: (batch_size=1, seq_len=1, input_size)
+        obs_t_input = obs_t.unsqueeze(0).unsqueeze(0)  # (1,1,input_size)
+        state_t_input = state_t.unsqueeze(0).unsqueeze(0)  # (1,1,input_size_critic)
 
-
-        obs_t_tensor = ActorRNN.process_observation(obs_t)
 
         # Actor policy: get action distribution and next hidden state
-        action_probs, next_actor_hidden = actor_policy(obs_t_tensor, actor_hidden_state)
+        action_probs, next_actor_hidden = actor_policy(obs_t_input, actor_hidden_state)
         action = self.sample_action(action_probs)
 
         # Step environment with all actions
@@ -247,7 +190,7 @@ class ProximalPolicyOptimization:
         next_state = self.get_global_state(env)
 
         # Critic policy: get value and next critic hidden state
-        value, next_critic_hidden = critic_policy(state_t, critic_hidden_state)
+        value, next_critic_hidden = critic_policy(state_t_input, critic_hidden_state)
 
         trajectories_next_step=[
             state_t,
@@ -257,49 +200,334 @@ class ProximalPolicyOptimization:
             action,
             reward_t, 
             next_state,
-            next_obs
+            next_obs,
+            value
         ]
 
         return trajectories_next_step
     
-    def get_global_state(self,env):
+    def updateRNN(self,trajectories, initial_actor_hidden, initial_critic_hidden):
+        states = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+        obs = torch.stack([
+            self.flatten_observation(t)
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 1  # Keep only the observation at index 1 of each 9-element chunk
+        ])
+        
+        across_agent_probs, across_agent_final_actor_hiddens, across_agent_values, across_agent_final_critic_hiddens=[],[],[],[]
 
+        #update RNN hidden states for π and V from first hidden state in data chunk
+        for agent in self.env.agents:
+
+            agent_states = states[agent]  
+            agent_obs = obs[agent]
+
+            actor_input = agent_obs.unsqueeze(0)
+            critic_input = agent_states.unsqueeze(0)
+
+            probs, final_actor_hidden = self.actor_policies[agent].rnn(actor_input, initial_actor_hidden[agent])
+
+            values, final_critic_hidden = self.critic_policies[agent].rnn(critic_input, initial_critic_hidden[agent])
+
+            across_agent_probs.append(probs)
+            across_agent_final_actor_hiddens.append(final_actor_hidden)
+            across_agent_values.append(values)
+            across_agent_final_critic_hiddens.append(final_critic_hidden)
+
+        return across_agent_probs, across_agent_final_actor_hiddens, across_agent_values, across_agent_final_critic_hiddens
+    
+    def fit(self, trajectories, critic_hiddens,gamma = 0.99, lam = 0.95):
+        # Process trajectories
+        rewards = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 5  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+        critic_hiddens = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 3  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+        states = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+
+        # Compute discounted returns-to-go
+        returns = self.compute_returns(rewards, gamma)  # Shape: (n_agents * T,)
+
+        # Initialize tensor to store critic values
+        values = torch.zeros_like(returns)
+
+        for agent in self.env.agents:
+            agent_values = []
+
+            # Compute critic values (V(s)) for each state (index 0 in trajectory step)
+            with torch.no_grad():
+                for t in range(self.T):
+                    agent_states = states[agent]
+                    agent_hiddens = critic_hiddens[agent]
+                    
+                    state_input = agent_states[t].unsqueeze(0).unsqueeze(0)  # shape: (1, 1, state_dim)
+                    val, _ = self.critic_policies[agent](state_input, agent_hiddens[t])
+                    # val shape: (1, 1), take val.squeeze()
+                    agent_values.append(val.squeeze())
+
+            agent_values_tensor = torch.stack(agent_values, dim=0)  # shape: (T,)
+
+        # Compute returns using the rewards and the last value of zero (or bootstrap if you have next_value)
+        # For GAE, we need values and next values. We'll treat next_value at T as 0 for simplicity.
+        # We'll compute advantages per agent:
+        advantages = torch.zeros_like(values)
+
+        for agent in self.env.agents:
+            agent_rewards = rewards[agent]
+            agent_values = values[agent]
+
+            # Generalized Advantage Estimation (GAE)
+            # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+            # advantage_t = delta_t + gamma * lam * advantage_{t+1}
+            gae = 0.0
+            for t in reversed(range(self.T)):
+                if t == self.T - 1:
+                    next_value = 0.0
+                else:
+                    next_value = agent_values[t + 1].item()
+
+                delta = agent_rewards[t].item() + gamma * next_value - agent_values[t].item()
+                gae = delta + gamma * lam * gae
+                advantages[agent, t] = gae
+
+        # Normalize advantages across all agents and timesteps if desired
+        flat_adv = advantages.flatten()
+        advantages = (advantages - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+
+        return advantages
+        
+    def actor_adam(self, trajectories, actor_optimizers, old_action_probs, new_action_probs, A_hat):
+        obs = torch.stack([
+            self.flatten_observation(t)
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 1  # Keep only the observation at index 1 of each 9-element chunk
+        ])
+        actions = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 4  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+
+        for agent in enumerate(self.env.agents):
+            # Collect agent-specific data
+            agent_trajectory = trajectories[agent]
+            agent_advantages = A_hat[agent]
+            agent_obs = obs[agent]
+            agent_actions = actions[agent]
+            
+            new_log_probs = []
+            old_log_probs = []
+            
+            # for every time step
+            for t in range(self.T):
+                #for a single agent, a single observation and action
+                action_i = torch.stack(agent_obs[t])
+
+                # Compute log probabilities
+                new_lp = self.compute_log_prob(new_action_probs[agent], action_i)
+                old_lp = self.compute_log_prob(old_action_probs[agent], action_i)
+
+                new_log_probs.append(new_lp)
+                old_log_probs.append(old_lp)
+
+            # Stack log probabilities
+            new_log_probs = torch.stack(new_log_probs)
+            old_log_probs = torch.stack(old_log_probs)
+
+            # Compute the ratio
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            clipped_ratio = torch.clamp(ratio, 1 - 0.2, 1 + 0.2)
+
+            # Compute the PPO loss
+            actor_loss = -torch.min(ratio * agent_advantages, clipped_ratio * agent_advantages).mean()
+
+            # Backpropagate and update the actor network
+            actor_optimizers[agent].zero_grad()
+            actor_loss.backward()
+            actor_optimizers[agent].step()
+
+            # Update old actor policy
+            self.old_actor_policies[agent].load_state_dict(self.actor_policies[agent].state_dict())
+
+    def critic_adam(self, trajectories, critic_optimizers, critic_hidden, gamma=0.99, epsilon=0.1):
+        """
+        Perform critic updates using the PPO clipped value loss.
+
+        Args:
+            trajectories: List of trajectories for all agents.
+            critic_optimizers: Dictionary of optimizers for each agent's critic network.
+            critic_hidden: Dictionary of critic hidden states for each agent.
+            gamma: Discount factor for returns.
+            epsilon: Clipping parameter for value loss.
+        """
+        # Extract states, rewards, and compute returns
+        states = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+        rewards = torch.tensor([
+            t
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 5  # Keep only the 3rd element (index 2 of each 9-element chunk)
+        ])
+        returns = self.compute_returns(rewards, gamma)  # Discounted returns-to-go
+
+        for agent in self.env.agents:
+            # Extract agent-specific data
+            agent_states = states[agent]  # States for the agent
+            agent_returns = returns[agent]  # Returns for the agent
+            agent_critic_hidden = critic_hidden[agent]  # Hidden state for the agent
+
+            # Forward pass through the critic network
+            values, _ = self.critic_policies[agent](agent_states, agent_critic_hidden)
+
+            # Compute unclipped and clipped value losses
+            value_loss_unclipped = (values.squeeze(1) - agent_returns) ** 2
+            clipped_values = torch.clamp(
+                values.squeeze(1),
+                min=(agent_returns - epsilon),
+                max=(agent_returns + epsilon),
+            )
+            value_loss_clipped = (clipped_values - agent_returns) ** 2
+
+            # Compute critic loss by taking the maximum loss
+            agent_critic_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+            # Backpropagation and optimizer step
+            critic_optimizers[agent].zero_grad()
+            agent_critic_loss.backward()
+            critic_optimizers[agent].step()
+
+    def evaluate(self, step, eval_interval, eval_steps):
+        # Evaluation
+        if (step + 1) % eval_interval == 0:
+            self.env.reset()
+            step = 0
+            
+            for agent in self.env.agent_iter():
+                print("Step", step)
+                sys.stdout.flush()
+                # Observe and select action
+                observation = self.env.observe(agent)
+                obs_tensor = ActorRNN.process_observation(observation)
+                with torch.no_grad():
+                    action_probs, _ = self.actor_policies[agent](obs_tensor, None)
+                    chosen_action = self.sample_action(action_probs)
+                self.env.step(chosen_action)
+                self.env.render()
+
+                if agent == self.env.agents[-1]:  # Check if this is the last agent for the step
+                    step += 1
+                if step >= eval_steps:
+                    break
+
+    def compute_old_action_probs(self, trajectories):
+        """
+        Creates a copy of the actor policies for all agents, with the same structure and parameters.
+
+        Returns:
+            dict: A dictionary containing the copied actor policies for each agent.
+        """
+        obs = torch.stack([
+            self.flatten_observation(t)
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 1  # Keep only the observation at index 1 of each 9-element chunk
+        ])
+        actor_hidden_states = torch.stack([
+            t if isinstance(t, torch.Tensor) else torch.tensor(t)
+            for agent_trajectories in trajectories
+            for i, t in enumerate(agent_trajectories)
+            if (i % 9) == 2  # Keep only the actor hidden states
+        ])
+                    
+
+        old_actor_policies = {
+            agent: type(self.actor_policies[agent])(
+                self.actor_policies[agent].rnn.input_size,
+                self.actor_policies[agent].hidden_size,
+                self.actor_policies[agent].fc_unit_id.out_features,
+                self.actor_policies[agent].fc_city_id.out_features,
+                self.actor_policies[agent].fc_project_id.out_features
+            ) for agent in self.env.agents
+        }
+
+        # Copy the parameters
+        for agent in self.env.agents:
+            old_actor_policies[agent].load_state_dict(self.actor_policies[agent].state_dict())
+            
+        across_agents_actions_probs =[]
+        for agent in self.env.agents:   
+            print(f"Hidden states shape: {actor_hidden_states[agent].shape}")
+            obs_agent = obs[agent].view(1, 1, obs[agent].size(0))
+            print(f"Observations shape: {obs_agent.shape}")
+
+            action_probs, _ = old_actor_policies[agent](obs[agent], actor_hidden_states[agent])  # Actor hidden state
+            across_agents_actions_probs.append(action_probs)
+        return across_agents_actions_probs
+
+    def compute_log_prob(self, action_probs, action):
+        total_log_prob = 0.0
+        for key, probs in action_probs.items():
+            dist = Categorical(probs=probs)
+            selected_action = torch.tensor(action[key], dtype=torch.long)
+            log_prob = dist.log_prob(selected_action)
+            total_log_prob += log_prob
+        return total_log_prob
+        
+    def get_global_state(self, env):
+        # Gather all agent observations to construct a global state
         obs_for_critic = []
+        for agent in env.agents:
+            agent_obs = env.observe(agent)
+            obs_for_critic.append(agent_obs)
 
-        # Gather observations for all agents
-        for agent_idx in env.agents:
-            agent_obs = env.observe(env.agents[agent_idx])  # Get the local observation for the agent
-            obs_for_critic.append(agent_obs)  
-
-        # Critic policy: get value estimate and next hidden state
         critic_dict = {}
-        # this is stupid naming, this is just the mask
         critic_visibility = env.get_full_masked_map()
         map_copy = env.map.copy()
-        # do the masking
         critic_map = np.where(critic_visibility[:, :, np.newaxis].squeeze(2), map_copy, np.zeros_like(map_copy))
-        #print(critic_map.shape)
-        # THIS MIGHT FUCK THINGS UP IN THE FUTURE. 
-        critic_dict['map'] = critic_map
-        critic_dict['units'] = None
-        critic_dict['cities'] = None
-        critic_dict['money'] = None
-        for obs in obs_for_critic:
-            for key in obs:
-                if key != 'map':
-                    if critic_dict[key] is None: 
-                        critic_dict[key] = obs[key]
-                    else:
-                        critic_dict[key] = np.concatenate((critic_dict[key], obs[key]), axis=0) #idk if you can concatenate spaces.box
-                else: 
-                    pass
+        critic_dict['map'] = torch.tensor(critic_map, dtype=torch.float32).flatten()
 
-        for key in critic_dict: 
-            critic_dict[key] = torch.tensor(critic_dict[key], dtype=torch.float32).flatten()
-        state = torch.cat([critic_dict[key] for key in critic_dict]).unsqueeze(0)    
+        # Concatenate units, cities, money across agents
+        units_list = []
+        cities_list = []
+        money_list = []
+        for obs in obs_for_critic:
+            units_list.append(torch.tensor(obs['units'], dtype=torch.float32).flatten())
+            cities_list.append(torch.tensor(obs['cities'], dtype=torch.float32).flatten())
+            money_list.append(torch.tensor(obs['money'], dtype=torch.float32).flatten())
+
+        critic_dict['units'] = torch.cat(units_list)
+        critic_dict['cities'] = torch.cat(cities_list)
+        critic_dict['money'] = torch.cat(money_list)
+
+        state = torch.cat([critic_dict[k] for k in critic_dict]).float()
         return state
 
-    def initialize_starting_trajectories(self,env, actor_policies, n_agents):
+    def initialize_starting_trajectories(self,env, actor_policies):
         """
         Initialize the starting trajectories for each agent.
 
@@ -319,6 +547,7 @@ class ProximalPolicyOptimization:
         for agent_idx, agent in enumerate(env.agents):
             # Initial state and observation for each agent
             initial_observation = env.observe(agent)  # Local observation for the agent
+            initial_observation = ActorRNN.process_observation(initial_observation)
 
             # Initialize hidden states for actor and critic networks
             input_size = actor_policies[agent_idx].hidden_size
@@ -330,6 +559,7 @@ class ProximalPolicyOptimization:
             initial_reward = 0  # No reward has been received yet
             initial_next_state = initial_state  # Initial state is also the "next state"
             initial_next_observation = initial_observation  # Same for the observation
+            initial_value = 0
 
             # Create the initial trajectory structure
             starting_trajectory = [
@@ -340,12 +570,12 @@ class ProximalPolicyOptimization:
                 initial_action,            # Action at time t (None at start)
                 initial_reward,            # Reward at time t (0 at start)
                 initial_next_state,        # Next state (same as initial state)
-                initial_next_observation   # Next observation (same as initial observation)
+                initial_next_observation,   # Next observation (same as initial observation)
+                initial_value
             ]
             starting_trajectories.append(starting_trajectory)
 
         return starting_trajectories
-
 
     def sample_action(self, action_probs):
         # Sample action components
@@ -372,6 +602,7 @@ class ProximalPolicyOptimization:
             'project_id': project_id,
         }
         return action
+    
     def flatten_observation(self, observation):
         """
         Flattens a dictionary of observations into a single tensor.
@@ -392,114 +623,24 @@ class ProximalPolicyOptimization:
         return torch.cat(tensors)  # Concatenate into a single tensor
 
     def compute_returns(self, rewards, gamma=0.99):
-            """
-            Compute the discounted rewards-to-go (returns) for a given list of rewards.
-
-            Args:
-                rewards (torch.Tensor): A 1D tensor of rewards for a trajectory.
-                gamma (float): Discount factor for future rewards. Default is 0.99.
-
-            Returns:
-                torch.Tensor: A 1D tensor of discounted rewards-to-go (returns).
-            """
-            returns = torch.zeros_like(rewards)
-            discounted_sum = 0.0
-
-            # Calculate the returns in reverse order
-            for t in reversed(range(len(rewards))):
-                discounted_sum = rewards[t] + gamma * discounted_sum
-                returns[t] = discounted_sum
-
-            return returns
-    
-
-class ActorRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, max_units_per_agent, max_cities, max_projects):
-        super(ActorRNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
-        self.fc_action_type = nn.Linear(hidden_size, 7)
-        self.fc_unit_id = nn.Linear(hidden_size, max_units_per_agent)
-        self.fc_direction = nn.Linear(hidden_size, 4)
-        self.fc_city_id = nn.Linear(hidden_size, max_cities)
-        self.fc_project_id = nn.Linear(hidden_size, max_projects)
-            
-    def process_observation(obs):
-        if isinstance(obs, dict):
-            processed_obs = []
-            for key in obs:
-                value = obs[key]
-                if isinstance(value, np.ndarray) or isinstance(value, torch.Tensor):
-                    tensor_value = torch.tensor(value, dtype=torch.float32).flatten()
-                    processed_obs.append(tensor_value)
-                else:
-                    # Handle other types if necessary
-                    pass
-            obs_tensor = torch.cat(processed_obs).unsqueeze(0)
-        elif isinstance(obs, np.ndarray) or isinstance(obs, torch.Tensor):
-            # If obs is already a tensor or array, flatten and unsqueeze
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).flatten().unsqueeze(0)
-        else:
-            # Handle other types if necessary
-            raise TypeError(f"Unsupported observation type: {type(obs)}")
-        return obs_tensor
-
-
-    def forward(self, observation, hidden_state):
-        output, hidden_state = self.rnn(observation.unsqueeze(1), hidden_state)  # Add sequence dimension
-        output = output.squeeze(1)  # Remove sequence dimension
-
-        action_type_logits = self.fc_action_type(output)
-        action_type_probs = F.softmax(action_type_logits, dim=-1)
-
-        unit_id_logits = self.fc_unit_id(output)
-        unit_id_probs = F.softmax(unit_id_logits, dim=-1)
-
-        direction_logits = self.fc_direction(output)
-        direction_probs = F.softmax(direction_logits, dim=-1)
-
-        city_id_logits = self.fc_city_id(output)
-        city_id_probs = F.softmax(city_id_logits, dim=-1)
-
-        project_id_logits = self.fc_project_id(output)
-        project_id_probs = F.softmax(project_id_logits, dim=-1)
-
-        action_probs = {
-            'action_type': action_type_probs,
-            'unit_id': unit_id_probs,
-            'direction': direction_probs,
-            'city_id': city_id_probs,
-            'project_id': project_id_probs,
-        }
-
-        return action_probs, hidden_state
-    
-class CriticRNN(nn.Module):
-    def __init__(self, input_size, hidden_size):
         """
-        Critic RNN that estimates the value of a state.
+        Compute the discounted rewards-to-go (returns) for a given list of rewards.
 
         Args:
-            input_size: Size of the input observation.
-            hidden_size: Size of the RNN hidden state.
-        """
-        super(CriticRNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)  # Output a single value
-    
-    def forward(self, observation, hidden_state):
-        """
-        Forward pass of the critic network.
-
-        Args:
-            observation: Input observation tensor of shape (batch_size, input_size).
-            hidden_state: Hidden state of the RNN of shape (1, batch_size, hidden_size).
+            rewards (torch.Tensor): A 1D tensor of rewards for a trajectory.
+            gamma (float): Discount factor for future rewards. Default is 0.99.
 
         Returns:
-            value: Estimated value of shape (batch_size, 1).
-            hidden_state: Updated hidden state of the RNN of shape (1, batch_size, hidden_size).
+            torch.Tensor: A 1D tensor of discounted rewards-to-go (returns).
         """
-        output, hidden_state = self.rnn(observation.unsqueeze(1), hidden_state)  # Add sequence dimension
-        value = self.fc(output.squeeze(1))  # Remove sequence dimension
-        return value, hidden_state
+        returns = torch.zeros_like(rewards)
+        discounted_sum = 0.0
+
+        for agent in self.env.agents:
+            # Calculate the returns in reverse order
+            for t in reversed(range(len(rewards[agent]))):
+                discounted_sum = rewards[t] + gamma * discounted_sum
+                returns[agent, t] = discounted_sum
+
+        return returns
+    

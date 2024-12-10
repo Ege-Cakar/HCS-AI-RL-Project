@@ -8,7 +8,8 @@ import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 
 # Import the PPO class and the Actor/Critic RNNs from your implementation
-from train import ProximalPolicyOptimization, ActorRNN, CriticRNN
+from train import ProximalPolicyOptimization
+from rnn import ActorRNN, CriticRNN
 
 def preprocess_observation(obs):
     """
@@ -33,14 +34,15 @@ def main():
     # Define hyperparameters
     hidden_size = 1024
     lambdaa = 0.01
-    n_iters = 5 #number of training iterations
+    step_max = 30 #number of training iterations
     n_fit_trajectories = 100
     n_sample_trajectories = 100
-    max_steps = 100 #number of steps in trajectory
+    T = 100 #number of steps in trajectory
     num_epochs = 100
-    eval_interval=5
+    eval_interval=30 
     eval_steps=100 #number of steps to run civ game for
-    batch_size = 64  # Define your batch size
+    batch_size = 1  # Define your batch size
+    K = T/10
 
     # Initialize policies and optimizers
     actor_policies = {}
@@ -75,10 +77,12 @@ def main():
         actor_policies=actor_policies,
         critic_policies=critic_policies,
         lambdaa=lambdaa,
-        n_iters=n_iters,
+        step_max=step_max,
         n_fit_trajectories=n_fit_trajectories,
         n_sample_trajectories=n_sample_trajectories,
-        max_steps = max_steps
+        T = T, 
+        batch_size = batch_size,
+        K = K
     )
 
     # Train the policies
