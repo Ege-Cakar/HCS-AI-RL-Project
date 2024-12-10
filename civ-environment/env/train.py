@@ -126,7 +126,7 @@ class ProximalPolicyOptimization:
             # ACTOR LOSS UPDATES
             self.actor_adam(trajectories, actor_optimizers, old_action_probs, probs, A_hat)
             old_action_probs = probs
-            self.critic_adam(trajectories, critic_optimizers, critic_hiddens)
+            self.critic_adam(trajectories, critic_optimizers, values)
 
             self.evaluate(step, eval_interval, eval_steps)
 
@@ -388,7 +388,7 @@ class ProximalPolicyOptimization:
             actor_loss.backward()
             actor_optimizers[agent].step()
 
-    def critic_adam(self, trajectories, critic_optimizers, critic_hidden, gamma=0.99, epsilon=0.1):
+    def critic_adam(self, trajectories, critic_optimizers, across_agent_values, gamma=0.99, epsilon=0.1):
         """
         Perform critic updates using the PPO clipped value loss.
 
@@ -400,28 +400,21 @@ class ProximalPolicyOptimization:
             epsilon: Clipping parameter for value loss.
         """
         # Extract states, rewards, and compute returns
-        states = torch.tensor([
+        states = torch.stack([
             t
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
             if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
         ])
-        rewards = torch.tensor([
-            t
-            for agent_trajectories in trajectories
-            for i, t in enumerate(agent_trajectories)
-            if (i % 9) == 5  # Keep only the 3rd element (index 2 of each 9-element chunk)
-        ])
+        rewards = torch.tensor([[t for i, t in enumerate(agent_trajectories) if (i % 9) == 5]
+                   for agent_trajectories in trajectories], dtype=torch.float32)
         returns = self.compute_returns(rewards, gamma)  # Discounted returns-to-go
 
         for agent in self.env.agents:
             # Extract agent-specific data
-            agent_states = states[agent]  # States for the agent
             agent_returns = returns[agent]  # Returns for the agent
-            agent_critic_hidden = critic_hidden[agent]  # Hidden state for the agent
 
-            # Forward pass through the critic network
-            values, _ = self.critic_policies[agent](agent_states, agent_critic_hidden)
+            values = across_agent_values[agent]
 
             # Compute unclipped and clipped value losses
             value_loss_unclipped = (values.squeeze(1) - agent_returns) ** 2
@@ -439,29 +432,61 @@ class ProximalPolicyOptimization:
             critic_optimizers[agent].zero_grad()
             agent_critic_loss.backward()
             critic_optimizers[agent].step()
-
+    
     def evaluate(self, step, eval_interval, eval_steps):
-        # Evaluation
+        """
+        Evaluate the trained policies on the environment.
+
+        Args:
+            step (int): Current training step.
+            eval_interval (int): Interval at which evaluation is performed.
+            eval_steps (int): Number of steps to evaluate.
+        """
         if (step + 1) % eval_interval == 0:
+            print("Starting evaluation...")
             self.env.reset()
-            step = 0
-            
+            step_counter = 0
+
+            # Initialize hidden states for all agents
+            actor_hidden_states = {
+                agent: torch.zeros(1, 1, self.actor_policies[agent].hidden_size) 
+                for agent in self.env.agents
+            }
+            critic_hidden_states = {
+                agent: torch.zeros(1, 1, self.critic_policies[agent].hidden_size) 
+                for agent in self.env.agents
+            }
+
+            # Loop over agent interactions in the environment
             for agent in self.env.agent_iter():
-                print("Step", step)
+                print(f"Step {step_counter}, Agent {agent}")
                 sys.stdout.flush()
-                # Observe and select action
+
+                # Observe and process the observation
                 observation = self.env.observe(agent)
-                obs_tensor = ActorRNN.process_observation(observation)
+                obs_tensor = ActorRNN.process_observation(observation).unsqueeze(0).unsqueeze(0)
+
                 with torch.no_grad():
-                    action_probs, _ = self.actor_policies[agent](obs_tensor, None)
+                    # Use the trained policy to compute action probabilities
+                    action_probs, actor_hidden_states[agent] = self.actor_policies[agent](
+                        obs_tensor, actor_hidden_states[agent]
+                    )
+                    # Sample an action
                     chosen_action = self.sample_action(action_probs)
+
+                # Step the environment with the chosen action
                 self.env.step(chosen_action)
                 self.env.render()
 
-                if agent == self.env.agents[-1]:  # Check if this is the last agent for the step
-                    step += 1
-                if step >= eval_steps:
+                # Increment step counter when all agents have acted
+                if agent == self.env.agents[-1]:
+                    step_counter += 1
+
+                # Break evaluation after reaching the desired number of steps
+                if step_counter >= eval_steps:
                     break
+
+            print("Evaluation complete.")
 
     def compute_old_action_probs(self, trajectories):
         """
@@ -508,10 +533,6 @@ class ProximalPolicyOptimization:
         return across_agents_actions_probs
 
     def compute_log_prob(self, action_probs, action):
-
-        print("Action probabilities:", action_probs)
-        print("Chosen action:", action)
-
         total_log_prob = 0.0
         for key, probs in action_probs.items():
             dist = Categorical(probs=probs)
