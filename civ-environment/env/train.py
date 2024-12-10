@@ -102,21 +102,22 @@ class ProximalPolicyOptimization:
                 D.append(trajectories)
 
                 old_action_probs = self.compute_old_action_probs(trajectories)
+                old_action_probs = [{k: v.detach() for k,v in a.items()} for a in old_action_probs]
 
                 # Compute advantages
                 A_hat = self.fit(trajectories)
 
                 D.append(trajectories)
 
-            for minibatch in range(self.K): #for now, just a single trajectory
+            for minibatch in range(int(self.K)): #for now, just a single trajectory
                 random_mini_batch = random.choice(D) #TO CHANGE: mini batch is 1 rn
 
                 chunk_size = 45 # TO CHANGE: just doing every 5 time steps
 
                 data_chunks = [random_mini_batch[i:i+chunk_size] for i in range(0, len(random_mini_batch), chunk_size)]
 
-                actor_hiddens = random_mini_batch[:, 2]  # Actor hidden from first step of trajectory
-                critic_hiddens = random_mini_batch[:, 3] # Critic hidden from first step of trajectory
+                actor_hiddens = [step[2] for step in random_mini_batch]
+                critic_hiddens = [step[3] for step in random_mini_batch]
 
                 for data_chunk in data_chunks:
                     # update RNN hidden states for π and V from first hidden state in data chunk and propagate
@@ -124,6 +125,7 @@ class ProximalPolicyOptimization:
 
             # ACTOR LOSS UPDATES
             self.actor_adam(trajectories, actor_optimizers, old_action_probs, probs, A_hat)
+            old_action_probs = probs
             self.critic_adam(trajectories, critic_optimizers, critic_hiddens)
 
             self.evaluate(step, eval_interval, eval_steps)
@@ -155,12 +157,13 @@ class ProximalPolicyOptimization:
                     agent
                 )
                 cumulative_rewards[agent, step]+=trajectories_next_step[-4]
+                trajectories[agent].extend(trajectories_next_step)
                 t+=1
                 if t >= self.T*len(self.env.agents):
                     break
-            trajectories[agent].extend(trajectories_next_step)
             #shape: # agents x length of trajectory
-            return trajectories,cumulative_rewards
+        
+        return trajectories,cumulative_rewards
     
     def generate_single_trajectory(self,env,actor_policy,critic_policy,past_trajectory,agent):
             
@@ -170,7 +173,10 @@ class ProximalPolicyOptimization:
         actor_hidden_state = past_trajectory[-7] 
         critic_hidden_state = past_trajectory[-6]
         state_t = past_trajectory[-3]
-        obs_t = past_trajectory[-2]
+        obs_t_dict = past_trajectory[-2]
+        obs_t = self.flatten_observation(obs_t_dict)  # convert dict to tensor
+        obs_t_input = obs_t.unsqueeze(0).unsqueeze(0)
+
         # Prepare inputs for RNNs: (batch_size=1, seq_len=1, input_size)
         obs_t_input = obs_t.unsqueeze(0).unsqueeze(0)  # (1,1,input_size)
         state_t_input = state_t.unsqueeze(0).unsqueeze(0)  # (1,1,input_size_critic)
@@ -207,7 +213,7 @@ class ProximalPolicyOptimization:
         return trajectories_next_step
     
     def updateRNN(self,trajectories, initial_actor_hidden, initial_critic_hidden):
-        states = torch.tensor([
+        states = torch.stack([
             t
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
@@ -228,13 +234,13 @@ class ProximalPolicyOptimization:
             agent_states = states[agent]  
             agent_obs = obs[agent]
 
-            actor_input = agent_obs.unsqueeze(0)
-            critic_input = agent_states.unsqueeze(0)
+            actor_input = agent_obs.unsqueeze(0).unsqueeze(0)
+            critic_input = agent_states.unsqueeze(0).unsqueeze(0)
 
-            probs, final_actor_hidden = self.actor_policies[agent].rnn(actor_input, initial_actor_hidden[agent])
 
-            values, final_critic_hidden = self.critic_policies[agent].rnn(critic_input, initial_critic_hidden[agent])
 
+            probs, final_actor_hidden = self.actor_policies[agent](actor_input, initial_actor_hidden[agent])
+            values, final_critic_hidden = self.critic_policies[agent](critic_input, initial_critic_hidden[agent])
             across_agent_probs.append(probs)
             across_agent_final_actor_hiddens.append(final_actor_hidden)
             across_agent_values.append(values)
@@ -242,21 +248,20 @@ class ProximalPolicyOptimization:
 
         return across_agent_probs, across_agent_final_actor_hiddens, across_agent_values, across_agent_final_critic_hiddens
     
-    def fit(self, trajectories, critic_hiddens,gamma = 0.99, lam = 0.95):
+    def fit(self, trajectories,gamma = 0.99, lam = 0.95):
         # Process trajectories
-        rewards = torch.tensor([
-            t
-            for agent_trajectories in trajectories
-            for i, t in enumerate(agent_trajectories)
-            if (i % 9) == 5  # Keep only the 3rd element (index 2 of each 9-element chunk)
-        ])
-        critic_hiddens = torch.tensor([
+        rewards = [[t for i, t in enumerate(agent_trajectories) if (i % 9) == 5]
+                   for agent_trajectories in trajectories]
+
+        # Convert to a 2D tensor
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        critic_hiddens = torch.stack([
             t
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
             if (i % 9) == 3  # Keep only the 3rd element (index 2 of each 9-element chunk)
         ])
-        states = torch.tensor([
+        states = torch.stack([
             t
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
@@ -274,14 +279,13 @@ class ProximalPolicyOptimization:
 
             # Compute critic values (V(s)) for each state (index 0 in trajectory step)
             with torch.no_grad():
-                for t in range(self.T):
-                    agent_states = states[agent]
-                    agent_hiddens = critic_hiddens[agent]
-                    
-                    state_input = agent_states[t].unsqueeze(0).unsqueeze(0)  # shape: (1, 1, state_dim)
-                    val, _ = self.critic_policies[agent](state_input, agent_hiddens[t])
-                    # val shape: (1, 1), take val.squeeze()
-                    agent_values.append(val.squeeze())
+                agent_states = states[agent]
+                agent_hiddens = critic_hiddens[agent]
+                
+                state_input = agent_states.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, state_dim)
+                val, _ = self.critic_policies[agent](state_input, agent_hiddens)
+                # val shape: (1, 1), take val.squeeze()
+                agent_values.append(val.squeeze())
 
             agent_values_tensor = torch.stack(agent_values, dim=0)  # shape: (T,)
 
@@ -313,7 +317,20 @@ class ProximalPolicyOptimization:
         advantages = (advantages - flat_adv.mean()) / (flat_adv.std() + 1e-8)
 
         return advantages
-        
+    def compute_log_prob(self, distributions, action):
+        # 'distributions' might be a dict or tuple containing separate distributions for each action dimension.
+        # 'action' could be a dict or tuple with the chosen actions for each dimension.
+
+        # Example assuming 'distributions' is a dict of Torch distributions and
+        # 'action' is a dictionary with keys matching the distributions.
+        log_prob = 0.0
+        log_prob += distributions['action_type'].log_prob(torch.tensor(action['action_type']))
+        log_prob += distributions['unit_id'].log_prob(torch.tensor(action['unit_id']))
+        log_prob += distributions['direction'].log_prob(torch.tensor(action['direction']))
+        log_prob += distributions['city_id'].log_prob(torch.tensor(action['city_id']))
+        log_prob += distributions['project_id'].log_prob(torch.tensor(action['project_id']))
+        return log_prob
+
     def actor_adam(self, trajectories, actor_optimizers, old_action_probs, new_action_probs, A_hat):
         obs = torch.stack([
             self.flatten_observation(t)
@@ -321,53 +338,55 @@ class ProximalPolicyOptimization:
             for i, t in enumerate(agent_trajectories)
             if (i % 9) == 1  # Keep only the observation at index 1 of each 9-element chunk
         ])
-        actions = torch.tensor([
-            t
-            for agent_trajectories in trajectories
-            for i, t in enumerate(agent_trajectories)
-            if (i % 9) == 4  # Keep only the 3rd element (index 2 of each 9-element chunk)
-        ])
 
-        for agent in enumerate(self.env.agents):
-            # Collect agent-specific data
+   
+        actions = []
+        for agent_trajectories in trajectories:
+            # Extract actions (every 9th element starting at index 4)
+            agent_actions = [t for i, t in enumerate(agent_trajectories) if i % 9 == 4]
+            actions.append(agent_actions)
+        
+
+        for agent, agent_name in enumerate(self.env.agents):
+            # Extract the per-agent trajectories, advantages, obs, actions
             agent_trajectory = trajectories[agent]
             agent_advantages = A_hat[agent]
             agent_obs = obs[agent]
-            agent_actions = actions[agent]
-            
+            agent_actions = actions[agent]  # actions should be a tensor or dict per timestep
+
             new_log_probs = []
             old_log_probs = []
-            
-            # for every time step
-            for t in range(self.T):
-                #for a single agent, a single observation and action
-                action_i = torch.stack(agent_obs[t])
 
-                # Compute log probabilities
-                new_lp = self.compute_log_prob(new_action_probs[agent], action_i)
-                old_lp = self.compute_log_prob(old_action_probs[agent], action_i)
+            # For every time step
+            for t in range(self.T):
+                # Retrieve the agent's chosen action at time t
+                # If you've stored them as dictionaries:
+                chosen_action = {
+                    'action_type': agent_actions[t]['action_type'],
+                    'unit_id': agent_actions[t]['unit_id'],
+                    'direction': agent_actions[t]['direction'],
+                    'city_id': agent_actions[t]['city_id'],
+                    'project_id': agent_actions[t]['project_id']
+                }
+                # Compute the log probability from the new and old policies
+                new_lp = self.compute_log_prob(new_action_probs[agent], chosen_action)
+                old_lp = self.compute_log_prob(old_action_probs[agent], chosen_action)
 
                 new_log_probs.append(new_lp)
                 old_log_probs.append(old_lp)
 
-            # Stack log probabilities
+            # Convert lists to tensors
             new_log_probs = torch.stack(new_log_probs)
             old_log_probs = torch.stack(old_log_probs)
 
-            # Compute the ratio
+            # Compute ratio and PPO loss as usual
             ratio = torch.exp(new_log_probs - old_log_probs)
             clipped_ratio = torch.clamp(ratio, 1 - 0.2, 1 + 0.2)
-
-            # Compute the PPO loss
             actor_loss = -torch.min(ratio * agent_advantages, clipped_ratio * agent_advantages).mean()
 
-            # Backpropagate and update the actor network
             actor_optimizers[agent].zero_grad()
             actor_loss.backward()
             actor_optimizers[agent].step()
-
-            # Update old actor policy
-            self.old_actor_policies[agent].load_state_dict(self.actor_policies[agent].state_dict())
 
     def critic_adam(self, trajectories, critic_optimizers, critic_hidden, gamma=0.99, epsilon=0.1):
         """
@@ -481,15 +500,18 @@ class ProximalPolicyOptimization:
             
         across_agents_actions_probs =[]
         for agent in self.env.agents:   
-            print(f"Hidden states shape: {actor_hidden_states[agent].shape}")
-            obs_agent = obs[agent].view(1, 1, obs[agent].size(0))
-            print(f"Observations shape: {obs_agent.shape}")
+            obs_agent = obs[agent].unsqueeze(0).unsqueeze(0)  
 
-            action_probs, _ = old_actor_policies[agent](obs[agent], actor_hidden_states[agent])  # Actor hidden state
+            action_probs, _ = old_actor_policies[agent](obs_agent, actor_hidden_states[agent])  # Actor hidden state
             across_agents_actions_probs.append(action_probs)
+
         return across_agents_actions_probs
 
     def compute_log_prob(self, action_probs, action):
+
+        print("Action probabilities:", action_probs)
+        print("Chosen action:", action)
+
         total_log_prob = 0.0
         for key, probs in action_probs.items():
             dist = Categorical(probs=probs)
@@ -553,9 +575,17 @@ class ProximalPolicyOptimization:
             input_size = actor_policies[agent_idx].hidden_size
             actor_hidden_state = torch.zeros(1, 1, input_size)  # Shape: (1, batch_size, hidden_size)
             critic_hidden_state = torch.zeros(1, 1, input_size)
+        
+            action_type = random.choice([env.MOVE_UNIT, env.ATTACK_UNIT, env.FOUND_CITY, env.ASSIGN_PROJECT, env.NO_OP])
 
             # Placeholder for the rest of the trajectory components
-            initial_action = torch.zeros((5,), dtype=torch.float32)  # Adjust `action_space_size` as needed
+            initial_action = {
+                "action_type": action_type,
+                "unit_id": random.randint(0, len(env.units[agent]) - 1) if env.units[agent] else 0,
+                "direction": random.randint(0, 3),
+                "city_id": random.randint(0, len(env.cities[agent]) - 1) if env.cities[agent] else 0,
+                "project_id": random.randint(0, env.max_projects - 1)
+            }
             initial_reward = 0  # No reward has been received yet
             initial_next_state = initial_state  # Initial state is also the "next state"
             initial_next_observation = initial_observation  # Same for the observation
@@ -602,25 +632,26 @@ class ProximalPolicyOptimization:
             'project_id': project_id,
         }
         return action
-    
+        
     def flatten_observation(self, observation):
-        """
-        Flattens a dictionary of observations into a single tensor.
+        if isinstance(observation, dict):
+            # Flatten dictionary values
+            tensors = []
+            for key, value in observation.items():
+                if isinstance(value, np.ndarray):
+                    value = torch.tensor(value, dtype=torch.float32)
+                elif not isinstance(value, torch.Tensor):
+                    # handle other cases if necessary
+                    pass
+                tensors.append(value.flatten())
+            return torch.cat(tensors)
+        elif isinstance(observation, torch.Tensor):
+            # Already a tensor, just return it as is (or flatten if needed)
+            return observation.flatten()
+        else:
+            # Handle other unexpected types if necessary
+            raise TypeError(f"Unsupported observation type: {type(observation)}")
 
-        Args:
-            observation (dict): A dictionary of observations.
-
-        Returns:
-            torch.Tensor: A flattened tensor of concatenated observation values.
-        """
-        tensors = []
-        for key, value in observation.items():
-            if isinstance(value, np.ndarray):  # Convert NumPy arrays to tensors
-                value = torch.tensor(value, dtype=torch.float32)
-            elif not isinstance(value, torch.Tensor):  # Skip non-tensor types
-                continue
-            tensors.append(value.flatten())  # Flatten each tensor
-        return torch.cat(tensors)  # Concatenate into a single tensor
 
     def compute_returns(self, rewards, gamma=0.99):
         """
@@ -639,7 +670,7 @@ class ProximalPolicyOptimization:
         for agent in self.env.agents:
             # Calculate the returns in reverse order
             for t in reversed(range(len(rewards[agent]))):
-                discounted_sum = rewards[t] + gamma * discounted_sum
+                discounted_sum = rewards[agent,t] + gamma * discounted_sum
                 returns[agent, t] = discounted_sum
 
         return returns

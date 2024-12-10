@@ -37,7 +37,7 @@ def main():
     step_max = 30 #number of training iterations
     n_fit_trajectories = 100
     n_sample_trajectories = 100
-    T = 100 #number of steps in trajectory
+    T = 10 #number of steps in trajectory
     num_epochs = 100
     eval_interval=30 
     eval_steps=100 #number of steps to run civ game for
