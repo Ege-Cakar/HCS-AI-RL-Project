@@ -33,6 +33,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     if device=="cpu":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     # Define hyperparameters
     hidden_size = 1024
