@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ActorRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, max_units_per_agent, max_cities, max_projects):
+    def __init__(self, input_size, hidden_size, max_units_per_agent, max_cities, max_projects, device):
         super(ActorRNN, self).__init__()
+        self.device = device
         self.hidden_size = hidden_size
         self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
         self.fc_action_type = nn.Linear(hidden_size, 7)
@@ -12,6 +13,7 @@ class ActorRNN(nn.Module):
         self.fc_direction = nn.Linear(hidden_size, 4)
         self.fc_city_id = nn.Linear(hidden_size, max_cities)
         self.fc_project_id = nn.Linear(hidden_size, max_projects)
+        self.to(self.device)
 
     @staticmethod
     def process_observation(obs):
@@ -46,6 +48,8 @@ class ActorRNN(nn.Module):
             hidden_states: (1, batch_size, hidden_size)
         """
         # Pass through GRU
+        observations = observations.to(self.device)
+        hidden_states = hidden_states.to(self.device)
         output, hidden_states = self.rnn(observations, hidden_states)
         # output: (batch_size, seq_len, hidden_size)
 
@@ -69,11 +73,13 @@ class ActorRNN(nn.Module):
 
 
 class CriticRNN(nn.Module):
-    def __init__(self, input_size, hidden_size):
+    def __init__(self, input_size, hidden_size, device):
         super(CriticRNN, self).__init__()
+        self.device = device
         self.hidden_size = hidden_size
-        self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
+        self.rnn = nn.GRU(input_size, hidden_size, batch_first=True).to(self.device)
+        self.fc = nn.Linear(hidden_size, 1).to(self.device)
+        self.to(self.device)
 
     def forward(self, states, hidden_states):
         """
@@ -86,6 +92,8 @@ class CriticRNN(nn.Module):
             hidden_states: (batch_size, hidden_size)
         """
         # Reshape hidden_states to (1, batch_size, hidden_size) for GRU compatibility
+        states = states.to(self.device)
+        hidden_states = hidden_states.to(self.device)
 
         output, hidden_states = self.rnn(states, hidden_states)
 

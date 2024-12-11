@@ -30,7 +30,7 @@ State = TypeVar("State")  # Represents the state type
 Action = TypeVar("Action")  # Represents the action type
 
 class ProximalPolicyOptimization:
-    def __init__(self, env, actor_policies, critic_policies, lambdaa, step_max, n_fit_trajectories, n_sample_trajectories, T, batch_size, K):
+    def __init__(self, env, actor_policies, critic_policies, lambdaa, step_max, n_fit_trajectories, n_sample_trajectories, T, batch_size, K, device):
         """
         Initialize PPO with environment and hyperparameters.
 
@@ -44,9 +44,12 @@ class ProximalPolicyOptimization:
             n_sample_trajectories: Number of trajectories for optimizing the policy.
             T: Number of iterations to run trajectory for
         """
+        self.device = device
         self.env = env
-        self.actor_policies = actor_policies
-        self.critic_policies = critic_policies 
+        self.actor_policies = {
+            agent: policy.to(self.device) for agent, policy in actor_policies.items()
+        }
+        self.critic_policies = critic_policies.to(self.device)
         self.lambdaa = lambdaa
         self.step_max = step_max
         self.n_fit_trajectories = n_fit_trajectories
@@ -99,7 +102,7 @@ class ProximalPolicyOptimization:
             "Entropy"
             ]
 
-        cumulative_rewards = np.zeros((len(self.env.agents), self.step_max)) # List to store cumulative rewards per iteration
+        cumulative_rewards = torch.zeros((len(self.env.agents), self.step_max), device=self.device) # List to store cumulative rewards per iteration
         reward_components = {agent: {key: [0] * self.step_max for key in keys} for agent in self.env.agents}
 
         for step in range(self.step_max):
@@ -138,7 +141,7 @@ class ProximalPolicyOptimization:
 
                 # If your step structure is [state, obs, actor_hidden, critic_hidden, action, reward, next_state, next_obs, value]
                 actor_hiddens = [agent_chunk[2] for agent_chunk in data_chunk]
-                critic_hiddens = data_chunk[0][3]
+                critic_hiddens = data_chunk[0][3].to(self.device)
 
                 critic_hiddens = critic_hiddens.squeeze(0)    
 
@@ -226,8 +229,8 @@ class ProximalPolicyOptimization:
         critic_hidden_state = past_trajectory[-6]
         state_t = past_trajectory[-3]
         obs_t_dict = past_trajectory[-2]
-        obs_t = self.flatten_observation(obs_t_dict)  # convert dict to tensor
-        obs_t_input = obs_t.unsqueeze(0).unsqueeze(0)
+        obs_t = self.flatten_observation(obs_t_dict).to(self.device)  # convert dict to tensor
+        obs_t_input = obs_t.unsqueeze(0).unsqueeze(0) # This line is here twice? 
 
         # Prepare inputs for RNNs: (batch_size=1, seq_len=1, input_size)
         obs_t_input = obs_t.unsqueeze(0).unsqueeze(0)  # (1,1,input_size)
@@ -305,22 +308,22 @@ class ProximalPolicyOptimization:
                    for agent_trajectories in trajectories]
 
         # Convert to a 2D tensor
-        rewards = torch.tensor(rewards, dtype=torch.float32)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
         
         first_agent_trajectory = trajectories[0]
         global_states = [
             t for i, t in enumerate(first_agent_trajectory)
             if (i % 9) == 0
         ]
-        global_states = torch.stack(global_states, dim=0)  # shape: [T, state_dim]
+        global_states = torch.stack(global_states, dim=0).to(self.device)  # shape: [T, state_dim]
 
         # Compute discounted returns-to-go
         returns = self.compute_returns(rewards, discount)  # Shape: (n_agents * T,)
         critic_hiddens = [
-            t for i, t in enumerate(first_agent_trajectory)
+            t.to(self.device) for i, t in enumerate(first_agent_trajectory)
             if (i % 9) == 3
         ]
-        critic_hiddens = torch.stack(critic_hiddens, dim=0)  # shape: [T, state_dim]
+        critic_hiddens = torch.stack(critic_hiddens, dim=0).to(self.device)  # shape: [T, state_dim]
         critic_hiddens = critic_hiddens.squeeze(1).squeeze(1).unsqueeze(0)
 
 
@@ -436,7 +439,7 @@ class ProximalPolicyOptimization:
         """
         # Extract states, rewards, and compute returns
         states = torch.stack([
-            t
+            t.to(self.device)
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
             if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
@@ -453,8 +456,8 @@ class ProximalPolicyOptimization:
         # Convert to a tensor [n_agents, T, 1]
 
         # Flatten both returns and values
-        flat_values = across_agent_values.view(-1)
-        flat_returns = returns.view(-1)
+        flat_values = across_agent_values.view(-1).to(self.device)
+        flat_returns = returns.view(-1).to(self.device)
 
         # Compute unclipped and clipped value losses
         value_loss_unclipped = (flat_values - flat_returns) ** 2
@@ -618,13 +621,13 @@ class ProximalPolicyOptimization:
             dict: A dictionary containing the copied actor policies for each agent.
         """
         obs = torch.stack([
-            self.flatten_observation(t)
+            self.flatten_observation(t).to(self.device)
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
             if (i % 9) == 1  # Keep only the observation at index 1 of each 9-element chunk
         ])
         actor_hidden_states = torch.stack([
-            t if isinstance(t, torch.Tensor) else torch.tensor(t)
+            t.to(self.device) if isinstance(t, torch.Tensor) else torch.tensor(t, device=self.device)
             for agent_trajectories in trajectories
             for i, t in enumerate(agent_trajectories)
             if (i % 9) == 2  # Keep only the actor hidden states
@@ -637,7 +640,8 @@ class ProximalPolicyOptimization:
                 self.actor_policies[agent].hidden_size,
                 self.actor_policies[agent].fc_unit_id.out_features,
                 self.actor_policies[agent].fc_city_id.out_features,
-                self.actor_policies[agent].fc_project_id.out_features
+                self.actor_policies[agent].fc_project_id.out_features,
+                self.actor_policies[agent].device,
             ) for agent in self.env.agents
         }
 
@@ -659,6 +663,7 @@ class ProximalPolicyOptimization:
         for key, probs in action_probs.items():
             dist = Categorical(probs=probs)
             selected_action = torch.tensor(action[key], dtype=torch.long)
+            selected_action = selected_action.to(self.device)
             log_prob = dist.log_prob(selected_action)
             total_log_prob += log_prob
         return total_log_prob
@@ -689,7 +694,7 @@ class ProximalPolicyOptimization:
         critic_dict['cities'] = torch.cat(cities_list)
         critic_dict['money'] = torch.cat(money_list)
 
-        state = torch.cat([critic_dict[k] for k in critic_dict]).float()
+        state = torch.cat([critic_dict[k] for k in critic_dict]).float().to(self.device)
         return state
 
     def initialize_starting_trajectories(self,env, actor_policies):
@@ -782,15 +787,15 @@ class ProximalPolicyOptimization:
             tensors = []
             for key, value in observation.items():
                 if isinstance(value, np.ndarray):
-                    value = torch.tensor(value, dtype=torch.float32)
+                    value = torch.tensor(value, dtype=torch.float32, device=self.device)
                 elif not isinstance(value, torch.Tensor):
                     # handle other cases if necessary
                     pass
                 tensors.append(value.flatten())
-            return torch.cat(tensors)
+            return torch.cat(tensors).to(self.device)
         elif isinstance(observation, torch.Tensor):
             # Already a tensor, just return it as is (or flatten if needed)
-            return observation.flatten()
+            return observation.flatten().to(self.device)
         else:
             # Handle other unexpected types if necessary
             raise TypeError(f"Unsupported observation type: {type(observation)}")

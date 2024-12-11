@@ -30,6 +30,7 @@ def main():
     env = Civilization(map_size, num_agents)
     env = wrappers.CaptureStdoutWrapper(env)
     env = wrappers.OrderEnforcingWrapper(env)
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
     # Define hyperparameters
     hidden_size = 1024
@@ -68,8 +69,8 @@ def main():
         action_size = act_space['action_type'].n
 
         # Initialize actor and critic networks
-        actor_policies[agent] = ActorRNN(input_size, hidden_size, action_size, env.max_cities, env.max_projects)
-    critic_policies = CriticRNN(input_size_critic, hidden_size)
+        actor_policies[agent] = ActorRNN(input_size, hidden_size, action_size, env.max_cities, env.max_projects, device)
+    critic_policies = CriticRNN(input_size_critic, hidden_size, device)
 
     # Instantiate PPO
     ppo = ProximalPolicyOptimization(
@@ -82,7 +83,8 @@ def main():
         n_sample_trajectories=n_sample_trajectories,
         T = T, 
         batch_size = batch_size,
-        K = K
+        K = K,
+        device=device
     )
 
     # Train the policies
