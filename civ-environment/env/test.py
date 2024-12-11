@@ -31,6 +31,8 @@ def main():
     env = wrappers.CaptureStdoutWrapper(env)
     env = wrappers.OrderEnforcingWrapper(env)
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    if device=="cpu":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Define hyperparameters
     hidden_size = 1024
