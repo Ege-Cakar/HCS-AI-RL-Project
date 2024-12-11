@@ -80,12 +80,26 @@ class ProximalPolicyOptimization:
             for agent, policy in self.actor_policies.items()
         }
 
-        critic_optimizers = {
-            agent: torch.optim.Adam(policy.parameters(), lr=1e-3)
-            for agent, policy in self.critic_policies.items()
-        }
+        critic_optimizers = torch.optim.Adam(self.critic_policies.parameters(), lr=1e-3)
+
+        
+        keys = [
+            "P_progress",
+            "P_completion",
+            "C_tiles",
+            "C_cities",
+            "L_cities",
+            "C_units",
+            "L_units",
+            "delta_GDP",
+            "delta_Energy",
+            "C_resources",
+            "E_impact",
+            "Stalling"
+            ]
 
         cumulative_rewards = np.zeros((len(self.env.agents), self.step_max)) # List to store cumulative rewards per iteration
+        reward_components = {agent: {key: [0] * self.step_max for key in keys} for agent in self.env.agents}
 
         for step in range(self.step_max):
             print(f"Training iteration: {step}")
@@ -97,10 +111,8 @@ class ProximalPolicyOptimization:
 
                 self.env.reset()   
                 
-                trajectories, cumulative_rewards = self.generate_all_trajectories(cumulative_rewards, step)
-                    
-                D.append(trajectories)
-
+                trajectories, cumulative_rewards, reward_components = self.generate_all_trajectories(cumulative_rewards,reward_components, step)
+                
                 old_action_probs = self.compute_old_action_probs(trajectories)
                 old_action_probs = [{k: v.detach() for k,v in a.items()} for a in old_action_probs]
 
@@ -110,14 +122,23 @@ class ProximalPolicyOptimization:
                 D.append(trajectories)
 
             for minibatch in range(int(self.K)): #for now, just a single trajectory
-                random_mini_batch = random.choice(D) #TO CHANGE: mini batch is 1 rn
 
-                chunk_size = 45 # TO CHANGE: just doing every 5 time steps
+                random_mini_batch = random.choice(D) #TO CHANGE: mini batch is 1 trajectory rn
+                chunk_size = 9*5 # TO CHANGE: just doing every 5 time steps
 
-                data_chunks = [random_mini_batch[i:i+chunk_size] for i in range(0, len(random_mini_batch), chunk_size)]
+                data_chunks = [
+                    [row[i:i+chunk_size] for row in random_mini_batch]
+                    for i in range(0, len(random_mini_batch[0]), chunk_size)
+                ]
+                # Take the first data chunk
+                data_chunk = data_chunks[0]
 
-                actor_hiddens = [step[2] for step in random_mini_batch]
-                critic_hiddens = [step[3] for step in random_mini_batch]
+                # If your step structure is [state, obs, actor_hidden, critic_hidden, action, reward, next_state, next_obs, value]
+                actor_hiddens = [agent_chunk[2] for agent_chunk in data_chunk]
+                critic_hiddens = data_chunk[0][3]
+
+                critic_hiddens = critic_hiddens.squeeze(0)    
+
 
                 for data_chunk in data_chunks:
                     # update RNN hidden states for π and V from first hidden state in data chunk and propagate
@@ -129,41 +150,69 @@ class ProximalPolicyOptimization:
             self.critic_adam(trajectories, critic_optimizers, values)
 
             self.evaluate(step, eval_interval, eval_steps)
+        
+        fig, axes = plt.subplots(len(self.env.agents), 1, figsize=(8, 4 * len(self.env.agents)))
+
+        for agent in self.env.agents:
+            ax = axes[agent]
+            for reward_type in keys:
+                ax.plot(range(self.step_max),reward_components[agent][reward_type], label = reward_type)
+                ax.set_xlabel("Iteration")
+                ax.set_ylabel("Cumulative Reward")
+                ax.set_title(f"Agent{agent}")
+                ax.grid()   
+                ax.legend()
+        plt.tight_layout
+        if self.step_max >=10:
+            plt.savefig("outputs/cumulative_reward_component.png")  # Save as PNG
+        plt.show()
 
         plt.figure(figsize=(10, 6))
         for agent in range(len(self.env.agents)):
-            plt.plot(range(self.step_max), cumulative_rewards[agent, :], label=f"Agent {agent + 1}")
+            plt.plot(range(self.step_max), cumulative_rewards[agent, :], label=f"Agent {agent }")
         plt.xlabel("Training Iterations")
         plt.ylabel("Cumulative Reward")
         plt.title("Cumulative Reward Over Training Iterations")
         plt.legend()
         plt.grid()
+        if self.step_max >=10:
+            plt.savefig("outputs/cumulative_reward.png")  # Save as PNG
         plt.show()
-        return None
-    
-    def generate_all_trajectories(self, cumulative_rewards, step):
-        trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies)
 
-        t=0
-        while t<self.T:
-            sys.stdout.flush()
-            for agent in self.env.agent_iter():
-                sys.stdout.flush()
-                trajectories_next_step = self.generate_single_trajectory( #for a single agent
-                    self.env,
-                    self.actor_policies[agent],
-                    self.critic_policies[agent],
-                    trajectories[agent],
-                    agent
-                )
-                cumulative_rewards[agent, step]+=trajectories_next_step[-4]
-                trajectories[agent].extend(trajectories_next_step)
-                t+=1
-                if t >= self.T*len(self.env.agents):
-                    break
+        # Data to save
+        if self.step_max >=10:
+            data = f"Hyperparameters:\n Ran for {self.step_max} iterations \n Each iteration runs {self.batch_size} trajectories \n Each trajectory contains {self.T} time steps"
+
+            # Save to a text file
+            with open("outputs/hyperparams.txt", "w") as file:
+                file.write(data)
+            return None
+    
+    def generate_all_trajectories(self, cumulative_rewards,reward_components, step):
+        trajectories = self.initialize_starting_trajectories(self.env, self.actor_policies)
+                
+        t_ag=0
+        for agent in self.env.agent_iter():
+            trajectories_next_step, agent_reward_components = self.generate_single_trajectory( #for a single agent
+                self.env,
+                self.actor_policies[agent],
+                self.critic_policies,
+                trajectories[agent],
+                agent
+            )
+            cumulative_rewards[agent, step]+=trajectories_next_step[-4] #for plotting
+
+            for key, value in agent_reward_components.items():
+                reward_components[agent][key][step]+=value
+
+            trajectories[agent].extend(trajectories_next_step)
+            t_ag+=1
+
+            if t_ag >= self.T*len(self.env.agents):
+                break
             #shape: # agents x length of trajectory
         
-        return trajectories,cumulative_rewards
+        return trajectories,cumulative_rewards, reward_components
     
     def generate_single_trajectory(self,env,actor_policy,critic_policy,past_trajectory,agent):
             
@@ -189,7 +238,7 @@ class ProximalPolicyOptimization:
         # Step environment with all actions
         agent = env.agent_selection
         env.step(action)  # Pass a dictionary with the agent and its action
-        reward_t = env.rewards[agent]
+        reward_t , reward_components= env.rewards[agent]
 
         done = env.dones[agent]
         next_obs = env.observe(agent)
@@ -210,15 +259,16 @@ class ProximalPolicyOptimization:
             value
         ]
 
-        return trajectories_next_step
+        return trajectories_next_step, reward_components
     
     def updateRNN(self,trajectories, initial_actor_hidden, initial_critic_hidden):
-        states = torch.stack([
-            t
-            for agent_trajectories in trajectories
-            for i, t in enumerate(agent_trajectories)
-            if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
-        ])
+        first_agent_trajectory = trajectories[0]
+        global_states = [
+            t for i, t in enumerate(first_agent_trajectory)
+            if (i % 9) == 0
+        ]
+        global_states = torch.stack(global_states, dim=0)  # shape: [T, state_dim]
+
         obs = torch.stack([
             self.flatten_observation(t)
             for agent_trajectories in trajectories
@@ -226,97 +276,80 @@ class ProximalPolicyOptimization:
             if (i % 9) == 1  # Keep only the observation at index 1 of each 9-element chunk
         ])
         
-        across_agent_probs, across_agent_final_actor_hiddens, across_agent_values, across_agent_final_critic_hiddens=[],[],[],[]
+        across_agent_probs, across_agent_final_actor_hiddens=[],[]
+        global_states.unsqueeze(0)
 
+        
+        values, final_critic_hiddens = self.critic_policies(global_states, initial_critic_hidden)
+        
         #update RNN hidden states for π and V from first hidden state in data chunk
         for agent in self.env.agents:
 
-            agent_states = states[agent]  
             agent_obs = obs[agent]
 
             actor_input = agent_obs.unsqueeze(0).unsqueeze(0)
-            critic_input = agent_states.unsqueeze(0).unsqueeze(0)
-
-
 
             probs, final_actor_hidden = self.actor_policies[agent](actor_input, initial_actor_hidden[agent])
-            values, final_critic_hidden = self.critic_policies[agent](critic_input, initial_critic_hidden[agent])
             across_agent_probs.append(probs)
             across_agent_final_actor_hiddens.append(final_actor_hidden)
-            across_agent_values.append(values)
-            across_agent_final_critic_hiddens.append(final_critic_hidden)
 
-        return across_agent_probs, across_agent_final_actor_hiddens, across_agent_values, across_agent_final_critic_hiddens
+
+        return across_agent_probs, across_agent_final_actor_hiddens, values, final_critic_hiddens
     
-    def fit(self, trajectories,gamma = 0.99, lam = 0.95):
+    def fit(self, trajectories,discount = 1.0, lam = 0.95):
         # Process trajectories
         rewards = [[t for i, t in enumerate(agent_trajectories) if (i % 9) == 5]
                    for agent_trajectories in trajectories]
 
         # Convert to a 2D tensor
         rewards = torch.tensor(rewards, dtype=torch.float32)
-        critic_hiddens = torch.stack([
-            t
-            for agent_trajectories in trajectories
-            for i, t in enumerate(agent_trajectories)
-            if (i % 9) == 3  # Keep only the 3rd element (index 2 of each 9-element chunk)
-        ])
-        states = torch.stack([
-            t
-            for agent_trajectories in trajectories
-            for i, t in enumerate(agent_trajectories)
-            if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
-        ])
+        
+        first_agent_trajectory = trajectories[0]
+        global_states = [
+            t for i, t in enumerate(first_agent_trajectory)
+            if (i % 9) == 0
+        ]
+        global_states = torch.stack(global_states, dim=0)  # shape: [T, state_dim]
 
         # Compute discounted returns-to-go
-        returns = self.compute_returns(rewards, gamma)  # Shape: (n_agents * T,)
+        returns = self.compute_returns(rewards, discount)  # Shape: (n_agents * T,)
+        critic_hiddens = [
+            t for i, t in enumerate(first_agent_trajectory)
+            if (i % 9) == 3
+        ]
+        critic_hiddens = torch.stack(critic_hiddens, dim=0)  # shape: [T, state_dim]
+        critic_hiddens = critic_hiddens.squeeze(1).squeeze(1).unsqueeze(0)
 
-        # Initialize tensor to store critic values
-        values = torch.zeros_like(returns)
 
-        for agent in self.env.agents:
-            agent_values = []
+        # Run the centralized critic to get values for each timestep.
+        # Suppose your critic expects input shape: [T, state_dim], and hidden: [1, T, hidden_dim] or similar.
+        # Adjust as necessary based on your CriticRNN definition.
+        values, _ = self.critic_policies(global_states.unsqueeze(1), critic_hiddens)
+        # Suppose values shape: [T, 1] after forward pass
 
-            # Compute critic values (V(s)) for each state (index 0 in trajectory step)
-            with torch.no_grad():
-                agent_states = states[agent]
-                agent_hiddens = critic_hiddens[agent]
-                
-                state_input = agent_states.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, state_dim)
-                val, _ = self.critic_policies[agent](state_input, agent_hiddens)
-                # val shape: (1, 1), take val.squeeze()
-                agent_values.append(val.squeeze())
 
-            agent_values_tensor = torch.stack(agent_values, dim=0)  # shape: (T,)
+        values = values.squeeze(-1)  # Now values: [T]
 
-        # Compute returns using the rewards and the last value of zero (or bootstrap if you have next_value)
-        # For GAE, we need values and next values. We'll treat next_value at T as 0 for simplicity.
-        # We'll compute advantages per agent:
-        advantages = torch.zeros_like(values)
 
-        for agent in self.env.agents:
-            agent_rewards = rewards[agent]
-            agent_values = values[agent]
+        # Compute advantages using Generalized Advantage Estimation (GAE)
+        advantages = torch.zeros_like(rewards)  # [n_agents, T]
+        gae = 0.0
+        for t in reversed(range(self.T)):
+            next_value = values[t+1,0].item() if t < self.T - 1 else 0.0
+            # Use mean of rewards across agents or handle differently
+            # If you prefer summation or another aggregation, do so here
+            mean_reward = rewards[:, t].mean().item()
+            delta = mean_reward + discount * next_value - values[t,0].item()
+            gae = delta + discount * lam * gae
+            # Assign the same advantage to all agents
+            advantages[:, t] = gae
 
-            # Generalized Advantage Estimation (GAE)
-            # delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
-            # advantage_t = delta_t + gamma * lam * advantage_{t+1}
-            gae = 0.0
-            for t in reversed(range(self.T)):
-                if t == self.T - 1:
-                    next_value = 0.0
-                else:
-                    next_value = agent_values[t + 1].item()
-
-                delta = agent_rewards[t].item() + gamma * next_value - agent_values[t].item()
-                gae = delta + gamma * lam * gae
-                advantages[agent, t] = gae
-
-        # Normalize advantages across all agents and timesteps if desired
+        # Normalize advantages
         flat_adv = advantages.flatten()
         advantages = (advantages - flat_adv.mean()) / (flat_adv.std() + 1e-8)
 
         return advantages
+    
     def compute_log_prob(self, distributions, action):
         # 'distributions' might be a dict or tuple containing separate distributions for each action dimension.
         # 'action' could be a dict or tuple with the chosen actions for each dimension.
@@ -347,7 +380,7 @@ class ProximalPolicyOptimization:
             actions.append(agent_actions)
         
 
-        for agent, agent_name in enumerate(self.env.agents):
+        for agent in self.env.agents:
             # Extract the per-agent trajectories, advantages, obs, actions
             agent_trajectory = trajectories[agent]
             agent_advantages = A_hat[agent]
@@ -388,16 +421,15 @@ class ProximalPolicyOptimization:
             actor_loss.backward()
             actor_optimizers[agent].step()
 
-    def critic_adam(self, trajectories, critic_optimizers, across_agent_values, gamma=0.99, epsilon=0.1):
+    def critic_adam(self, trajectories, critic_optimizers, across_agent_values, discount=1.0, epsilon=0.1):
         """
-        Perform critic updates using the PPO clipped value loss.
+        Perform critic updates using a single shared critic and PPO clipped value loss.
 
         Args:
             trajectories: List of trajectories for all agents.
-            critic_optimizers: Dictionary of optimizers for each agent's critic network.
-            critic_hidden: Dictionary of critic hidden states for each agent.
-            gamma: Discount factor for returns.
-            epsilon: Clipping parameter for value loss.
+            across_agent_values: Predicted values for all agents, presumably stacked or listed per agent.
+            gamma: Discount factor.
+            epsilon: Clipping parameter.
         """
         # Extract states, rewards, and compute returns
         states = torch.stack([
@@ -408,31 +440,85 @@ class ProximalPolicyOptimization:
         ])
         rewards = torch.tensor([[t for i, t in enumerate(agent_trajectories) if (i % 9) == 5]
                    for agent_trajectories in trajectories], dtype=torch.float32)
-        returns = self.compute_returns(rewards, gamma)  # Discounted returns-to-go
 
-        for agent in self.env.agents:
-            # Extract agent-specific data
-            agent_returns = returns[agent]  # Returns for the agent
 
-            values = across_agent_values[agent]
+        returns = self.compute_returns(rewards, discount)  # Shape: [n_agents, T]
 
-            # Compute unclipped and clipped value losses
-            value_loss_unclipped = (values.squeeze(1) - agent_returns) ** 2
-            clipped_values = torch.clamp(
-                values.squeeze(1),
-                min=(agent_returns - epsilon),
-                max=(agent_returns + epsilon),
-            )
-            value_loss_clipped = (clipped_values - agent_returns) ** 2
+        # across_agent_values should be a list of value tensors, one per agent, each shape [T, 1].
+        # Let's stack them into a single tensor:
+        # across_agent_values is currently a list indexed by agent, each an RNN output for that agent.
+        # Convert to a tensor [n_agents, T, 1]
 
-            # Compute critic loss by taking the maximum loss
-            agent_critic_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+        # Flatten both returns and values
+        flat_values = across_agent_values.view(-1)
+        flat_returns = returns.view(-1)
 
-            # Backpropagation and optimizer step
-            critic_optimizers[agent].zero_grad()
-            agent_critic_loss.backward()
-            critic_optimizers[agent].step()
+        # Compute unclipped and clipped value losses
+        value_loss_unclipped = (flat_values - flat_returns) ** 2
+        clipped_values = torch.clamp(flat_values, min=(flat_returns - epsilon), max=(flat_returns + epsilon))
+        value_loss_clipped = (clipped_values - flat_returns) ** 2
+
+        # PPO value loss
+        critic_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+        # Single backward and optimizer step
+        critic_optimizers.zero_grad()
+        critic_loss.backward()
+        critic_optimizers.step()
     
+
+
+
+
+
+
+    # def critic_adam(self, trajectories, critic_optimizers, across_agent_values, gamma=0.99, epsilon=0.1):
+    #     """
+    #     Perform critic updates using the PPO clipped value loss.
+
+    #     Args:
+    #         trajectories: List of trajectories for all agents.
+    #         critic_optimizers: Dictionary of optimizers for each agent's critic network.
+    #         critic_hidden: Dictionary of critic hidden states for each agent.
+    #         gamma: Discount factor for returns.
+    #         epsilon: Clipping parameter for value loss.
+    #     """
+    #     # Extract states, rewards, and compute returns
+    #     states = torch.stack([
+    #         t
+    #         for agent_trajectories in trajectories
+    #         for i, t in enumerate(agent_trajectories)
+    #         if (i % 9) == 0  # Keep only the 3rd element (index 2 of each 9-element chunk)
+    #     ])
+    #     rewards = torch.tensor([[t for i, t in enumerate(agent_trajectories) if (i % 9) == 5]
+    #                for agent_trajectories in trajectories], dtype=torch.float32)
+    #     returns = self.compute_returns(rewards, gamma)  # Discounted returns-to-go
+
+    #     for agent in self.env.agents:
+    #         # Extract agent-specific data
+    #         agent_returns = returns[agent]  # Returns for the agent
+
+    #         values = across_agent_values[agent]
+
+    #         # Compute unclipped and clipped value losses
+    #         value_loss_unclipped = (values.squeeze(1) - agent_returns) ** 2
+    #         clipped_values = torch.clamp(
+    #             values.squeeze(1),
+    #             min=(agent_returns - epsilon),
+    #             max=(agent_returns + epsilon),
+    #         )
+    #         value_loss_clipped = (clipped_values - agent_returns) ** 2
+
+    #         # Compute critic loss by taking the maximum loss
+    #         agent_critic_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+    #         # Backpropagation and optimizer step
+    #         critic_optimizers[agent].zero_grad()
+    #         agent_critic_loss.backward()
+    #         critic_optimizers[agent].step()
+
+
+
     def evaluate(self, step, eval_interval, eval_steps):
         """
         Evaluate the trained policies on the environment.
@@ -452,10 +538,16 @@ class ProximalPolicyOptimization:
                 agent: torch.zeros(1, 1, self.actor_policies[agent].hidden_size) 
                 for agent in self.env.agents
             }
-            critic_hidden_states = {
-                agent: torch.zeros(1, 1, self.critic_policies[agent].hidden_size) 
-                for agent in self.env.agents
-            }
+
+            action_types=[[]for agent in self.env.agents]
+                    # Action constants: 
+            # self.MOVE_UNIT = 0
+            # self.ATTACK_UNIT = 1
+            # self.FOUND_CITY = 2
+            # self.ASSIGN_PROJECT = 3
+            # self.NO_OP = 4
+            # self.BUY_WARRIOR = 5
+            # self.BUY_SETTLER = 6
 
             # Loop over agent interactions in the environment
             for agent in self.env.agent_iter():
@@ -474,6 +566,8 @@ class ProximalPolicyOptimization:
                     # Sample an action
                     chosen_action = self.sample_action(action_probs)
 
+                action_types[agent].append(chosen_action['action_type'])
+
                 # Step the environment with the chosen action
                 self.env.step(chosen_action)
                 self.env.render()
@@ -486,6 +580,31 @@ class ProximalPolicyOptimization:
                 if step_counter >= eval_steps:
                     break
 
+            action_labels = [
+                "MOVE_UNIT", "ATTACK_UNIT", "FOUND_CITY", 
+                "ASSIGN_PROJECT", "NO_OP", "BUY_WARRIOR", "BUY_SETTLER"
+            ]
+            fig, axes = plt.subplots(len(self.env.agents), 1, figsize=(8, 4 * len(self.env.agents)))
+
+            for agent in self.env.agents:
+                ax = axes[agent]
+
+                for action in range(7):
+                    action_occurences = np.where(np.array(action_types[agent])==action)
+                    sys.stdout.flush()
+                    hist, bin_edges = np.histogram(action_occurences, bins=5)
+                    # Convert histogram to line plot data
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    ax.plot(bin_centers, hist, marker='o', linestyle='-', label=action_labels[action])
+                
+                ax.set_title(f"Agent {agent}")
+                ax.set_xlabel("Evaluation Steps")
+                ax.set_ylabel("Action Counts")
+                ax.legend()
+            plt.tight_layout()
+            if self.step_max >=10:
+                plt.savefig("outputs/actions_eval.png")
+            plt.show()
             print("Evaluation complete.")
 
     def compute_old_action_probs(self, trajectories):
@@ -544,8 +663,8 @@ class ProximalPolicyOptimization:
     def get_global_state(self, env):
         # Gather all agent observations to construct a global state
         obs_for_critic = []
-        for agent in env.agents:
-            agent_obs = env.observe(agent)
+        for agent in self.env.agents:
+            agent_obs = self.env.observe(agent)
             obs_for_critic.append(agent_obs)
 
         critic_dict = {}
@@ -587,15 +706,15 @@ class ProximalPolicyOptimization:
         n_agents = len(env.agents)
         initial_state = self.get_global_state(env) # Global state
 
-        for agent_idx, agent in enumerate(env.agents):
+        for agent in self.env.agents:
             # Initial state and observation for each agent
             initial_observation = env.observe(agent)  # Local observation for the agent
             initial_observation = ActorRNN.process_observation(initial_observation)
 
             # Initialize hidden states for actor and critic networks
-            input_size = actor_policies[agent_idx].hidden_size
-            actor_hidden_state = torch.zeros(1, 1, input_size)  # Shape: (1, batch_size, hidden_size)
-            critic_hidden_state = torch.zeros(1, 1, input_size)
+            input_size = actor_policies[agent].hidden_size
+            actor_hidden_state = torch.zeros(1,1,  input_size)  # Shape: (1, batch_size, hidden_size)
+            critic_hidden_state = torch.zeros(1,1,  input_size)
         
             action_type = random.choice([env.MOVE_UNIT, env.ATTACK_UNIT, env.FOUND_CITY, env.ASSIGN_PROJECT, env.NO_OP])
 
@@ -674,7 +793,7 @@ class ProximalPolicyOptimization:
             raise TypeError(f"Unsupported observation type: {type(observation)}")
 
 
-    def compute_returns(self, rewards, gamma=0.99):
+    def compute_returns(self, rewards, discount=1):
         """
         Compute the discounted rewards-to-go (returns) for a given list of rewards.
 
@@ -685,13 +804,17 @@ class ProximalPolicyOptimization:
         Returns:
             torch.Tensor: A 1D tensor of discounted rewards-to-go (returns).
         """
+        rewards = rewards.float()  # Convert all elements to float
+
         returns = torch.zeros_like(rewards)
-        discounted_sum = 0.0
 
         for agent in self.env.agents:
+            discounted_sum = 0.0
             # Calculate the returns in reverse order
             for t in reversed(range(len(rewards[agent]))):
-                discounted_sum = rewards[agent,t] + gamma * discounted_sum
+                discounted_sum = float(rewards[agent, t]) + discount * discounted_sum  # Explicitly cast to float
+                
+                sys.stdout.flush()
                 returns[agent, t] = discounted_sum
 
         return returns

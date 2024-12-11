@@ -104,17 +104,26 @@ class Civilization(AECEnv):
         self.WARRIOR_COST = 40
         self.SETTLER_COST = 60
         # Initialize constants for the reward function
-        self.k1 = 1.0  # Progress of projects
-        self.k2 = 2.0  # Completion of projects
-        self.k3 = 0.1  # Tiles explored
-        self.k4 = 5.0  # Cities captured
-        self.k5 = 5.0  # Cities lost
-        self.k6 = 1.0  # Units eliminated
-        self.k7 = 1.0  # Units lost
-        self.k8 = 0.5  # Change in GDP
-        self.k9 = 0.5  # Change in Energy output
-        self.k10 = 0.35 # Resources gained
-        self.gamma = 0.3  # Environmental impact penalty
+        self.k1 = 100.0  # Progress of projects
+        self.k2 = 200.0  # Completion of projects
+        self.k3 = 10.0 # Tiles explored
+        self.k4 = 500.0  # Cities captured
+        self.k5 = 0.0  # Cities lost
+        self.k6 = 100.0  # Units eliminated
+        self.k7 = 0.0  # Units lost
+        self.k8 = 50.0 # Change in GDP
+        self.k9 = 50.0  # Change in Energy output
+        self.k10 = 35.0 # Resources gained
+        self.gamma = 0.0  # Environmental impact penalty
+        self.beta = 10.0
+        self.alpha =0.05
+
+        # New parameter for entropy scaling
+        self.k_entropy = 0.1  # Adjust this hyperparameter as needed
+        
+        # Keep track of how many times each agent visited each tile
+        self.state_visit_count = {agent: {} for agent in self.agents}
+
         # Tracking variables
         self.previous_states = {agent: None for agent in self.agents}
         self.units_lost = {agent: 0 for agent in self.agents}
@@ -172,10 +181,34 @@ class Civilization(AECEnv):
 
         
     def reward(self, agent, previous_state, current_state): 
-        if self._states_are_equal(previous_state, current_state):
-            #print(f"Agent {agent} performed an action that did not change the state. Penalized with -10.")
-            #Spams too much. Comment it out for now.
-            return -10
+        # if self._states_are_equal(previous_state, current_state):
+        #     P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
+        #     P_completion = current_state['completed_projects'] - previous_state['completed_projects']
+        #     C_tiles = current_state['explored_tiles'] - previous_state['explored_tiles']
+        #     C_cities = self.cities_captured[agent]
+        #     L_cities = self.cities_lost[agent]
+        #     C_units = self.units_eliminated[agent]
+        #     L_units = self.units_lost[agent]
+        #     delta_GDP = current_state['gdp'] - previous_state['gdp']
+        #     delta_Energy = current_state['energy_output'] - previous_state['energy_output']
+        #     C_resources = self.resources_gained[agent]
+        #     E_impact = current_state['environmental_impact'] 
+        #     components = {
+        #     "P_progress": P_progress,
+        #     "P_completion": P_completion,
+        #     "C_tiles": C_tiles,
+        #     "C_cities": C_cities,
+        #     "L_cities": L_cities,
+        #     "C_units": C_units,
+        #     "L_units": L_units,
+        #     "delta_GDP": delta_GDP,
+        #     "delta_Energy": delta_Energy,
+        #     "C_resources": C_resources,
+        #     "E_impact": E_impact
+        #     }
+        #     #print(f"Agent {agent} performed an action that did not change the state. Penalized with -10.")
+        #     #Spams too much. Comment it out for now.
+        #     return 0, components
         # Calculate differences between current and previous states
         P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
         P_completion = current_state['completed_projects'] - previous_state['completed_projects']
@@ -189,12 +222,33 @@ class Civilization(AECEnv):
         C_resources = self.resources_gained[agent]
         E_impact = current_state['environmental_impact'] # TODO: Evaluate making this change in env impact? 
         # Reset temporary tracking variables
+        Stalling =0.0
+        if self._states_are_equal(previous_state, current_state): #Make stalling part of reward function
+            Stalling = 1.0
+
+        Entropy = self._compute_entropy_of_visited_states(agent)
+
         self.units_eliminated[agent] = 0
         self.units_lost[agent] = 0
         self.cities_captured[agent] = 0
         self.cities_lost[agent] = 0
         self.resources_gained[agent] = 0
 
+
+        components = {
+            "P_progress": P_progress,
+            "P_completion": P_completion,
+            "C_tiles": C_tiles,
+            "C_cities": C_cities,
+            "L_cities": L_cities,
+            "C_units": C_units,
+            "L_units": L_units,
+            "delta_GDP": delta_GDP,
+            "delta_Energy": delta_Energy,
+            "C_resources": C_resources,
+            "E_impact": E_impact,
+            "Stalling": Stalling
+        }
         # Compute the reward
         reward = (self.k1 * P_progress + self.k2 * P_completion +
                   self.k3 * C_tiles +
@@ -203,8 +257,29 @@ class Civilization(AECEnv):
                   self.k8 * delta_GDP +
                   self.k9 * delta_Energy +
                   self.k10 * C_resources -
-                  self.gamma * E_impact)
-        return reward
+                  self.gamma * E_impact - 
+                  self.beta * Stalling +
+                  self.k_entropy * Entropy)
+
+
+        return reward, components
+
+    def _compute_entropy_of_visited_states(self, agent):
+        """
+        Compute the Shannon entropy of the distribution of visited tiles for the given agent.
+        
+        H = -sum(p(x)*log(p(x))) over visited states x
+        """
+        visit_counts = self.state_visit_count[agent].values()
+        if not visit_counts:
+            return 0.0
+        total_visits = sum(visit_counts)
+        # Compute probabilities
+        probabilities = [count / total_visits for count in visit_counts]
+        # Compute entropy
+        # Using a small offset to avoid log(0)
+        entropy = -sum(p * np.log(p + 1e-12) for p in probabilities)
+        return entropy
     
     def _states_are_equal(self, state1, state2):
         """
@@ -317,6 +392,8 @@ class Civilization(AECEnv):
         # Remove agent if done
         if self.dones[agent]:
             self.agents.remove(agent)
+        
+        self.update_state_visit_count(agent, self.visibility_maps[agent])
 
         # Advance to the next agent
         if self.agents:
@@ -325,6 +402,24 @@ class Civilization(AECEnv):
             self.agent_selection = None
             print("Game done!")
         #TODO: DO INFO? 
+
+    def update_state_visit_count(self, agent, current_visibility_map):
+        """
+        Update the state visit count for the given agent based on their current visibility map.
+
+        Args:
+            agent (str): The agent ID.
+            current_visibility_map (np.ndarray): A 2D boolean map of the agent's visibility.
+        """
+        # Find all visible tiles for the agent
+        visible_tiles = np.argwhere(current_visibility_map)
+
+        for tile in visible_tiles:
+            tile_tuple = tuple(tile)  # Convert to a hashable format
+            if tile_tuple not in self.state_visit_count[agent]:
+                self.state_visit_count[agent][tile_tuple] = 0
+            self.state_visit_count[agent][tile_tuple] += 1
+
 
     def _get_state_snapshot(self, agent):
         state = {

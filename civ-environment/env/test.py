@@ -34,15 +34,15 @@ def main():
     # Define hyperparameters
     hidden_size = 1024
     lambdaa = 0.01
-    step_max = 5 #number of training iterations
+    step_max = 30 #number of training iterations, has to be over 10 in order to save outputs
     n_fit_trajectories = 100
     n_sample_trajectories = 100
     T = 100 #number of steps in trajectory
     num_epochs = 100
     eval_interval=step_max 
-    eval_steps=100 #number of steps to run civ game for
+    eval_steps=T #number of steps to run civ game for
     batch_size = 1  # Define your batch size
-    K = T/10
+    K = 10 #number of minibatches to process
 
     # Initialize policies and optimizers
     actor_policies = {}
@@ -69,7 +69,7 @@ def main():
 
         # Initialize actor and critic networks
         actor_policies[agent] = ActorRNN(input_size, hidden_size, action_size, env.max_cities, env.max_projects)
-        critic_policies[agent] = CriticRNN(input_size_critic, hidden_size)
+    critic_policies = CriticRNN(input_size_critic, hidden_size)
 
     # Instantiate PPO
     ppo = ProximalPolicyOptimization(

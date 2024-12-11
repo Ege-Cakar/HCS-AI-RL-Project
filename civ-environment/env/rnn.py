@@ -75,16 +75,20 @@ class CriticRNN(nn.Module):
         self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
         self.fc = nn.Linear(hidden_size, 1)
 
-    def forward(self, observations, hidden_states):
+    def forward(self, states, hidden_states):
         """
         Forward pass:
-        observations: (batch_size, seq_len, input_size)
-        hidden_states: (1, batch_size, hidden_size)
+        states: (batch_size, seq_len, input_size)
+        hidden_states: (batch_size, hidden_size)
 
         Returns:
             values: (batch_size, seq_len, 1)
-            hidden_states: (1, batch_size, hidden_size)
+            hidden_states: (batch_size, hidden_size)
         """
-        output, hidden_states = self.rnn(observations, hidden_states)
+        # Reshape hidden_states to (1, batch_size, hidden_size) for GRU compatibility
+
+        output, hidden_states = self.rnn(states, hidden_states)
+
         values = self.fc(output)  # (batch_size, seq_len, 1)
         return values, hidden_states
+
