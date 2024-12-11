@@ -95,7 +95,8 @@ class ProximalPolicyOptimization:
             "delta_Energy",
             "C_resources",
             "E_impact",
-            "Stalling"
+            "Stalling",
+            "Entropy"
             ]
 
         cumulative_rewards = np.zeros((len(self.env.agents), self.step_max)) # List to store cumulative rewards per iteration
@@ -108,6 +109,8 @@ class ProximalPolicyOptimization:
             D = []
 
             for i in range(self.batch_size):
+
+                print(f"On batch {i}")
 
                 self.env.reset()   
                 

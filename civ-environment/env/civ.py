@@ -114,12 +114,11 @@ class Civilization(AECEnv):
         self.k8 = 50.0 # Change in GDP
         self.k9 = 50.0  # Change in Energy output
         self.k10 = 35.0 # Resources gained
-        self.gamma = 0.0  # Environmental impact penalty
-        self.beta = 10.0
-        self.alpha =0.05
+        self.gamma = 0.00001  # Environmental impact penalty
+        self.beta = 0.5
 
         # New parameter for entropy scaling
-        self.k_entropy = 0.1  # Adjust this hyperparameter as needed
+        self.k_entropy = 0.4  # Adjust this hyperparameter as needed
         
         # Keep track of how many times each agent visited each tile
         self.state_visit_count = {agent: {} for agent in self.agents}
@@ -181,34 +180,7 @@ class Civilization(AECEnv):
 
         
     def reward(self, agent, previous_state, current_state): 
-        # if self._states_are_equal(previous_state, current_state):
-        #     P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
-        #     P_completion = current_state['completed_projects'] - previous_state['completed_projects']
-        #     C_tiles = current_state['explored_tiles'] - previous_state['explored_tiles']
-        #     C_cities = self.cities_captured[agent]
-        #     L_cities = self.cities_lost[agent]
-        #     C_units = self.units_eliminated[agent]
-        #     L_units = self.units_lost[agent]
-        #     delta_GDP = current_state['gdp'] - previous_state['gdp']
-        #     delta_Energy = current_state['energy_output'] - previous_state['energy_output']
-        #     C_resources = self.resources_gained[agent]
-        #     E_impact = current_state['environmental_impact'] 
-        #     components = {
-        #     "P_progress": P_progress,
-        #     "P_completion": P_completion,
-        #     "C_tiles": C_tiles,
-        #     "C_cities": C_cities,
-        #     "L_cities": L_cities,
-        #     "C_units": C_units,
-        #     "L_units": L_units,
-        #     "delta_GDP": delta_GDP,
-        #     "delta_Energy": delta_Energy,
-        #     "C_resources": C_resources,
-        #     "E_impact": E_impact
-        #     }
-        #     #print(f"Agent {agent} performed an action that did not change the state. Penalized with -10.")
-        #     #Spams too much. Comment it out for now.
-        #     return 0, components
+
         # Calculate differences between current and previous states
         P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
         P_completion = current_state['completed_projects'] - previous_state['completed_projects']
@@ -236,18 +208,19 @@ class Civilization(AECEnv):
 
 
         components = {
-            "P_progress": P_progress,
-            "P_completion": P_completion,
-            "C_tiles": C_tiles,
-            "C_cities": C_cities,
-            "L_cities": L_cities,
-            "C_units": C_units,
-            "L_units": L_units,
-            "delta_GDP": delta_GDP,
-            "delta_Energy": delta_Energy,
-            "C_resources": C_resources,
-            "E_impact": E_impact,
-            "Stalling": Stalling
+            "P_progress": self.k1 * P_progress,
+            "P_completion": self.k2* P_completion,
+            "C_tiles": self.k3* C_tiles,
+            "C_cities": self.k4* C_cities,
+            "L_cities": self.k5* L_cities,
+            "C_units": self.k6* C_units,
+            "L_units": self.k7*L_units,
+            "delta_GDP": self.k8* delta_GDP,
+            "delta_Energy": self.k9* delta_Energy,
+            "C_resources": self.k10*C_resources,
+            "E_impact": self.gamma*E_impact,
+            "Stalling": self.beta*Stalling,
+            "Entropy": self.k_entropy * Entropy
         }
         # Compute the reward
         reward = (self.k1 * P_progress + self.k2 * P_completion +

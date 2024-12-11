@@ -34,14 +34,14 @@ def main():
     # Define hyperparameters
     hidden_size = 1024
     lambdaa = 0.01
-    step_max = 30 #number of training iterations, has to be over 10 in order to save outputs
-    n_fit_trajectories = 100
-    n_sample_trajectories = 100
-    T = 100 #number of steps in trajectory
+    step_max = 100 #number of training iterations, has to be over 10 in order to save outputs
+    n_fit_trajectories = 100 #have to delete
+    n_sample_trajectories = 100 #have to delete
+    T = 500 #number of steps in trajectory
     num_epochs = 100
     eval_interval=step_max 
     eval_steps=T #number of steps to run civ game for
-    batch_size = 1  # Define your batch size
+    batch_size = 5  # Define your batch size
     K = 10 #number of minibatches to process
 
     # Initialize policies and optimizers
