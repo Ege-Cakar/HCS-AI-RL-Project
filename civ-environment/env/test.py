@@ -30,9 +30,7 @@ def main():
     env = Civilization(map_size, num_agents)
     env = wrappers.CaptureStdoutWrapper(env)
     env = wrappers.OrderEnforcingWrapper(env)
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    if device=="cpu":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps")
     print(f"Using device: {device}")
 
     # Define hyperparameters
