@@ -35,14 +35,10 @@ def main():
     print(f"Using device: {device}")
 
     # Define hyperparameters
-    hidden_size = 1024
-    lambdaa = 0.01
-    step_max = 100 #number of training iterations, has to be over 10 in order to save outputs
-    n_fit_trajectories = 100 #have to delete
-    n_sample_trajectories = 100 #have to delete
-    T = 500 #number of steps in trajectory
-    num_epochs = 100
-    eval_interval=step_max 
+    hidden_size = 128
+    step_max = 50 #number of training iterations, has to be over 10 in order to save outputs
+    T = 50 #number of steps in trajectory
+    eval_interval=1 
     eval_steps=T #number of steps to run civ game for
     batch_size = 5  # Define your batch size
     K = 10 #number of minibatches to process
@@ -122,10 +118,7 @@ def main():
             env=env,
             actor_policies=actor_policies,
             critic_policies=critic_policies,
-            lambdaa=lambdaa,
             step_max=step_max,
-            n_fit_trajectories=n_fit_trajectories,
-            n_sample_trajectories=n_sample_trajectories,
             T = T, 
             batch_size = batch_size,
             K = K,

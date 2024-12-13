@@ -30,14 +30,13 @@ State = TypeVar("State")  # Represents the state type
 Action = TypeVar("Action")  # Represents the action type
 
 class ProximalPolicyOptimization:
-    def __init__(self, env, actor_policies, critic_policies, lambdaa, step_max, n_fit_trajectories, n_sample_trajectories, T, batch_size, K, device):
+    def __init__(self, env, actor_policies, critic_policies, step_max, T, batch_size, K, device):
         """
         Initialize PPO with environment and hyperparameters.
 
         Args:
             env: The environment for training.
             pi: Policy function that maps parameters to a function defining action probabilities.
-            lambdaa: Regularization coefficient.
             theta_init: Initial policy parameters.
             step_max: Number of training iterations.
             n_fit_trajectories: Number of trajectories for fitting the advantage function.
@@ -50,10 +49,7 @@ class ProximalPolicyOptimization:
             agent: policy.to(self.device) for agent, policy in actor_policies.items()
         }
         self.critic_policies = critic_policies.to(self.device)
-        self.lambdaa = lambdaa
         self.step_max = step_max
-        self.n_fit_trajectories = n_fit_trajectories
-        self.n_sample_trajectories = n_sample_trajectories
         self.T = T
         self.batch_size = batch_size
         self.K = K
