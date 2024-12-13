@@ -185,6 +185,9 @@ class ProximalPolicyOptimization:
         if self.step_max >=10:
             data = f"Hyperparameters:\n Ran for {self.step_max} iterations \n Each iteration runs {self.batch_size} trajectories \n Each trajectory contains {self.T} time steps"
 
+            torch.save({agent: self.actor_policies[agent].state_dict() for agent in self.env.agents}, "/content/drive/My Drive/saved_actor_policies.pth")
+            torch.save(self.critic_policies.state_dict(), "/content/drive/My Drive/saved_critic_policy.pth")
+            
             # Save to a text file
             with open("/content/drive/My Drive/hyperparams.txt", "w") as file:
                 file.write(data)
