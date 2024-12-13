@@ -170,19 +170,19 @@ class ProximalPolicyOptimization:
                 ax.legend()
         plt.tight_layout
         if self.step_max >=10:
-            plt.savefig("outputs/cumulative_reward_component.png")  # Save as PNG
+            plt.savefig("/content/drive/My Drive/cumulative_reward_component.png")  # Save as PNG
         plt.show()
 
         plt.figure(figsize=(10, 6))
         for agent in range(len(self.env.agents)):
-            plt.plot(range(self.step_max), cumulative_rewards[agent, :], label=f"Agent {agent }")
+            plt.plot(range(self.step_max), cumulative_rewards.cpu().detach().numpy()[agent, :], label=f"Agent {agent }")
         plt.xlabel("Training Iterations")
         plt.ylabel("Cumulative Reward")
         plt.title("Cumulative Reward Over Training Iterations")
         plt.legend()
         plt.grid()
         if self.step_max >=10:
-            plt.savefig("outputs/cumulative_reward.png")  # Save as PNG
+            plt.savefig("/content/drive/My Drive/cumulative_reward.png")  # Save as PNG
         plt.show()
 
         # Data to save
@@ -190,7 +190,7 @@ class ProximalPolicyOptimization:
             data = f"Hyperparameters:\n Ran for {self.step_max} iterations \n Each iteration runs {self.batch_size} trajectories \n Each trajectory contains {self.T} time steps"
 
             # Save to a text file
-            with open("outputs/hyperparams.txt", "w") as file:
+            with open("/content/drive/My Drive/hyperparams.txt", "w") as file:
                 file.write(data)
             return None
     
@@ -576,7 +576,7 @@ class ProximalPolicyOptimization:
 
                 # Step the environment with the chosen action
                 self.env.step(chosen_action)
-                self.env.render()
+                #self.env.render()      #TODO: change this back
 
                 # Increment step counter when all agents have acted
                 if agent == self.env.agents[-1]:
@@ -609,7 +609,7 @@ class ProximalPolicyOptimization:
                 ax.legend()
             plt.tight_layout()
             if self.step_max >=10:
-                plt.savefig("outputs/actions_eval.png")
+                plt.savefig("/content/drive/My Drive/actions_eval.png")
             plt.show()
             print("Evaluation complete.")
 
