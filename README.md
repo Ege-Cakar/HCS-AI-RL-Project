@@ -1,4 +1,4 @@
-# Eco Civilization MDP
+# Eco Civilization MDP: A Multi-Agent Environment for Studying Sustainable Growth
 
 ## Introduction
 
@@ -36,7 +36,7 @@ Here are some basic specifics for the Civilization environment for utilization w
 
 `map` is a 3D one-hot encoded tensor, represented as a `spaces.Box`, where the first two axes are used to represent a tile, and on the third axis we represent whether there's a resource there (3 values are reserved for energy resources, materials and water), whether there's a city, warrior or a settler for a specific player, and whether that tile is owned by a specific player. Ownership is defined by cities — each city founded grants ownership of tiles in a 2 tile radius to the player. As such, our third dimension is of size `3 + 3*num_agents + num_agents`. A one-hot encoded 2D tensor representing the fog of war is stored for each player, and the `map` tensor is masked with said fog of war tensor before being returned to the agent, making sure that they can only see what they've explored. The fog of war tensor is dynamically updated as agents explore the map with their units. 
 
-![](/Users/egecakar/Documents/Projects/Eco-Civilization-MDP/images/Map.png)
+![](images/Map.png)
 
 `units` encodes information about the units owned by the player, such as health and coordinates. It has a size of `max_num_units*4`, and is represented by a `spaces.Box`. 
 
