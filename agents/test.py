@@ -2,6 +2,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+env_dir = os.path.join(parent_dir, 'env')
+sys.path.append(env_dir)
 from civ import Civilization
 from pettingzoo.utils import wrappers
 import torch.nn.functional as F

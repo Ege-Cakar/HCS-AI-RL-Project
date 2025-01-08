@@ -22,7 +22,9 @@ from tqdm import tqdm
 import random
 from rnn import ActorRNN, CriticRNN
 
-
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+env_dir = os.path.join(parent_dir, 'env')
+sys.path.append(env_dir)
 from civ import Civilization
 
 # Type aliases for readability
