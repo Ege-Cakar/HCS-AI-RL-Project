@@ -20,7 +20,7 @@ then `cd` into it:
 cd Eco-Civilization-MDP
 ```
 
-where you will see the environment under the `env` folder, defined inside the `civ.py` file, and you will find the RNNs and the agents defined inside the `agents` folder. To use the environment, import the `Civilization` class, which is a Petting Zoo `AECEnv`,  in your implementation of learning agents. To use our implementation of MAPPO, run: 
+First, install the requirements via `pip install -r requirements.txt`, preferably in a virtual environment. You will see the environment under the `env` folder, defined inside the `civ.py` file, and you will find the RNNs and the agents defined inside the `agents` folder. To use the environment, import the `Civilization` class, which is a Petting Zoo `AECEnv`,  in your implementation of learning agents. To use our implementation of MAPPO, run: 
 
 ```bash
 python3 agents/test.py
