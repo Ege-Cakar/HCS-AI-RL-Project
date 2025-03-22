@@ -21,7 +21,7 @@ import math
 
 class Civilization(AECEnv): 
     metadata = {'render_modes': ['human'], 'name': 'Civilization_v0'}
-    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', *args, **kwargs):
+    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', aggression_factor = 1.0, *args, **kwargs):
         """
         Initialize the Civilization game.
         Args:
@@ -170,6 +170,9 @@ class Civilization(AECEnv):
             "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
             "project_id": spaces.Discrete(self.max_projects)       # For ASSIGN_PROJECT
         }) for agent in self.agents}
+
+        # user-alterable params
+        self.aggression_factor = aggression_factor
     
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -179,7 +182,7 @@ class Civilization(AECEnv):
         return self.action_spaces[agent]
 
         
-    def reward(self, agent, previous_state, current_state): 
+    def reward(self, agent, previous_state, current_state, aggression): 
 
         # Calculate differences between current and previous states
         P_progress = current_state['projects_in_progress'] - previous_state['projects_in_progress']
@@ -211,7 +214,7 @@ class Civilization(AECEnv):
             "P_progress": self.k1 * P_progress,
             "P_completion": self.k2* P_completion,
             "C_tiles": self.k3* C_tiles,
-            "C_cities": self.k4* C_cities,
+            "C_cities": self.k4* self.aggression_factor* C_cities,
             "L_cities": self.k5* L_cities,
             "C_units": self.k6* C_units,
             "L_units": self.k7*L_units,
