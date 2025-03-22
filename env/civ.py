@@ -7,6 +7,7 @@ from pettingzoo.utils.env import AECEnv
 import pygame
 from pygame.locals import QUIT
 import math
+from noise import pnoise2
 
 # TODO: Make sure invalid actions are handled gracefully
 # Example action: 
@@ -75,6 +76,16 @@ class Civilization(AECEnv):
         self.BUY_WARRIOR = 5
         self.BUY_SETTLER = 6
 
+        # Noise parameters
+        self.scale = 50.0   # scaling factor: higher values mean lower frequency (larger features)
+        self.octaves = 4     # number of noise layers for fBm
+        self.persistence = 0.5
+        self.lacunarity = 2.0
+        self.water_level = 0.00
+        self.land_fraction = 0.48
+        self.random_offset_x = np.random.randint(0, 100000)
+        self.random_offset_y = np.random.randint(0, 100000) 
+
         # unit types
 
         self.UNIT_TYPE_MAPPING = { 'warrior': 0, 'settler' : 1 }
@@ -84,7 +95,7 @@ class Civilization(AECEnv):
 
         # Initialize Pygame:
         pygame.init()
-        self.cell_size = 40  # Size of each tile in pixels
+        self.cell_size = 20  # Size of each tile in pixels
         self.window_width = self.map_width * self.cell_size
         self.window_height = self.map_height * self.cell_size
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
@@ -633,6 +644,12 @@ class Civilization(AECEnv):
             if not (0 <= new_x < self.env.map_width and 0 <= new_y < self.env.map_height):
                 return None  
 
+            # Check if the tile is ocean (value 0 in the terrain channel)
+            #terrain_channel = self.env._calculate_num_channels() - 1
+            #if self.env.map[new_y, new_x, terrain_channel] == 0:
+            #    return None  # Can't move to ocean tiles
+            # Maybe make it such that we can't move to ocean tiles? 
+
             # Check if the tile is empty of units and cities
             if self._is_tile_empty_of_units_and_cities(new_x, new_y):
                 return new_x, new_y
@@ -699,10 +716,14 @@ class Civilization(AECEnv):
             '''
             Found a city at the current location.
             Returns:
-                bool: True if the city can be founded (unit is a settler, tile is empty); False otherwise.
+                bool: True if the city can be founded (unit is a settler, tile is land and empty); False otherwise.
             '''
             # Only settlers can found cities
             if self.type == 'settler':
+                # Check if the current tile is not ocean
+                terrain_channel = self.env._calculate_num_channels() - 1
+                if self.env.map[self.y, self.x, terrain_channel] == 0:
+                    return False  # Can't found cities on ocean tiles
                 return True
             return None
     
@@ -823,7 +844,8 @@ class Civilization(AECEnv):
         ownership_channels = self.num_of_agents  # One channel per agent for ownership
         units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
         resources_channels = 3  # Resources, Materials, Water
-        return ownership_channels + units_channels + resources_channels
+        terrain_channel = 1  # Terrain or seawater
+        return ownership_channels + units_channels + resources_channels + terrain_channel
 
     def _calculate_city_attributes(self):
         """
@@ -853,15 +875,64 @@ class Civilization(AECEnv):
         num_channels = self._calculate_num_channels()
         self.map_height, self.map_width = self.map_size
         self.map = np.zeros((self.map_height, self.map_width, num_channels), dtype=np.float32)
-    
+        
+        # Generate terrain and seawater
+        self._generate_terrain()
         # Randomly place resources on the map
         self._place_resources()
-    
+
+
         # Place spawn settlers and warriors for each player
         self._place_starting_units()
 
         # TODO: Implement more complex world generation and spawn point selection?
+
+
     
+    def _generate_terrain(self):
+        terrain_channel = self._calculate_num_channels() - 1
+        
+        # Step 1: Generate noise map and store values in [0..1]
+        noise_map = np.zeros((self.map_height, self.map_width), dtype=float)
+        for i in range(self.map_height):
+            for j in range(self.map_width):
+                x = (i + self.random_offset_x) / self.scale
+                y = (j + self.random_offset_y) / self.scale
+                raw_noise = pnoise2(
+                    x, y,
+                    octaves=self.octaves,
+                    persistence=self.persistence,
+                    lacunarity=self.lacunarity
+                )
+                # Remap from [-1, 1] to [0, 1]
+                noise_map[i, j] = (raw_noise + 1) / 2.0
+        
+        # Step 2: Auto-balance threshold to achieve desired land fraction
+        desired_fraction = self.land_fraction
+        
+        def land_fraction(nmap, threshold):
+            return np.count_nonzero(nmap > threshold) / nmap.size
+        
+        threshold_low, threshold_high = 0.0, 1.0
+        max_iterations = 20
+        
+        for _ in range(max_iterations):
+            mid = (threshold_low + threshold_high) / 2.0
+            frac = land_fraction(noise_map, mid)
+            if frac > desired_fraction:
+                # Too much land => raise threshold
+                threshold_low = mid
+            else:
+                # Not enough land => lower threshold
+                threshold_high = mid
+        
+        final_threshold = (threshold_low + threshold_high) / 2.0
+        
+        # Step 3: Classify tiles as land (1) or water (0) using the auto-balanced threshold
+        for i in range(self.map_height):
+            for j in range(self.map_width):
+                self.map[i, j, terrain_channel] = 1 if noise_map[i, j] > final_threshold else 0
+
     def _initialize_projects(self):
         self.projects[0] = {'name': 'Make Warrior', 'duration': 3, 'type': 'unit', 'unit_type': 'warrior'}
         self.projects[1] = {'name': 'Make Settler', 'duration': 5, 'type': 'unit', 'unit_type': 'settler'}
@@ -922,7 +993,7 @@ class Civilization(AECEnv):
         
         self.visibility_maps[agent][y_min:y_max, x_min:x_max] = True
     
-    def _place_resources(self, bountifulness=0.15):
+    def _place_resources(self, bountifulness=0.05):
         """
         Randomly place resources, materials, and water on the map.
         """
@@ -933,8 +1004,11 @@ class Civilization(AECEnv):
         resources_channel = resource_channels_start  # Index for energy resources
         materials_channel = resource_channels_start + 1  # Index for materials
         water_channel = resource_channels_start + 2  # Index for water
+        terrain_channel = self._calculate_num_channels() - 1
 
-        all_tiles = [(x, y) for x in range(self.map_width) for y in range(self.map_height)]
+        # Only consider land tiles (terrain dimension == 1) for resource placement
+        all_tiles = [(x, y) for x in range(self.map_width) for y in range(self.map_height) 
+                    if self.map[y, x, terrain_channel] == 1]
         np.random.shuffle(all_tiles)  # Shuffle the list to randomize tile selection
         # POSSIBLE BOTTLENECK!
 
@@ -968,27 +1042,31 @@ class Civilization(AECEnv):
         """
         spawn_points = []
         for agent_idx in range(self.num_of_agents):
-            while True:
+            valid_spawn_found = False
+            for attempt in range(1000):
                 x = np.random.randint(0, self.map_width)
                 y = np.random.randint(0, self.map_height)
-                # Ensure the tile is empty (and not too close to other spawn points?)
-                if self._is_tile_empty(x, y):
+                if self._is_tile_empty(x, y) and self._is_land_tile(x, y):
+                    spawn_points.append((x, y))
+                    self._place_unit(agent_idx, 'settler', x, y)
+                    valid_spawn_found = True
                     break
-            spawn_points.append((x, y))
-            self._place_unit(agent_idx, 'settler', x, y)
+            if not valid_spawn_found:
+                raise RuntimeError(f"No valid land tile found to spawn agent {agent_idx} after many attempts.")
+            
             adjacent_tiles = self._get_adjacent_tiles(x, y) # Put in the first possible tile
             warrior_placed = False
             for adj_x, adj_y in adjacent_tiles:
-                if self._is_tile_empty(adj_x, adj_y):
+                if self._is_tile_empty(adj_x, adj_y) and self._is_land_tile(adj_x, adj_y):
                     # Place the warrior at (adj_x, adj_y)
                     self._place_unit(agent_idx, 'warrior', adj_x, adj_y)
                     warrior_placed = True
                     break
             if not warrior_placed:
                 # Handle the case where no adjacent empty tile is found
-                #print(f"Warning: Could not place warrior for agent {agent_idx} adjacent to settler at ({x}, {y}).")
-               # Optionally, expand search radius
-               pass
+                print(f"Warning: Could not place warrior for agent {agent_idx} adjacent to settler at ({x}, {y}).")
+                # Optionally, expand search radius
+                pass
 
     
     def _is_tile_empty(self, x, y):
@@ -1025,6 +1103,20 @@ class Civilization(AECEnv):
 
         # If no ownership, units, or cities are present, the tile is empty
         return True
+
+    def _is_land_tile(self, x, y):
+        """
+        Check if a tile is land (not ocean).
+        
+        Args:
+            x (int): x-coordinate of the tile.
+            y (int): y-coordinate of the tile.
+            
+        Returns:
+            bool: True if the tile is land; False if it's ocean.
+        """
+        terrain_channel = self._calculate_num_channels() - 1
+        return self.map[y, x, terrain_channel] == 1
 
     def _get_tile_info(self, x, y):
         """
@@ -1102,7 +1194,7 @@ class Civilization(AECEnv):
     def _place_unit_near_city(self, agent, unit_type, x, y):
         adjacent_tiles = self._get_adjacent_tiles(x, y)
         for adj_x, adj_y in adjacent_tiles:
-            if self._is_tile_empty(adj_x, adj_y):
+            if self._is_tile_empty(adj_x, adj_y) and self._is_land_tile(adj_x, adj_y):
                 self._place_unit(self.agents.index(agent), unit_type, adj_x, adj_y)
                 return True
         return False
@@ -1255,11 +1347,23 @@ class Civilization(AECEnv):
             #print(f"Agent {agent_idx} can see {len(visible_tiles)} tiles.") # Debugging
             #print(visible_tiles) # Debugging
 
-        
+
     def _draw_grid(self):
         """
-        Draw the grid lines on the screen.
+        Draw the grid lines on the screen and color terrain.
         """
+        # Draw terrain colors first
+        terrain_channel = self.num_of_agents + 3 * self.num_of_agents + 3  # Assuming terrain is after resources
+        for y in range(self.map_height):
+            for x in range(self.map_width):
+                if self.map[y, x, terrain_channel] == 0:  # Water/ocean tiles
+                    rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
+                    pygame.draw.rect(self.screen, (0, 0, 100), rect)  # Dark blue for water
+                else:  # Land tiles
+                    rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
+                    pygame.draw.rect(self.screen, (100, 100, 100), rect)  # Light gray for land
+        
+        # Draw grid lines
         for x in range(0, self.window_width, self.cell_size):
             pygame.draw.line(self.screen, (50, 50, 50), (x, 0), (x, self.window_height))
         for y in range(0, self.window_height, self.cell_size):
@@ -1435,7 +1539,7 @@ class Civilization(AECEnv):
 
 # Testing 
 if __name__ == "__main__":
-    map_size = (20, 30) 
+    map_size = (50, 100) 
     num_agents = 4        
     env = Civilization(map_size, num_agents)
     env.reset()
