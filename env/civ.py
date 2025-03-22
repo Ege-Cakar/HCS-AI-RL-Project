@@ -321,7 +321,22 @@ class Civilization(AECEnv):
         }
         return observation
 
+    def regenerate_resources(self, regeneration_rate=1, max_quantity=20):
+        """
+        Iterate over the resource channels of the map and increase the resource quantities 
+        by regeneration_rate up to a specified max_quantity.
+        """
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
+        for y in range(self.map_height):
+            for x in range(self.map_width):
+                for offset in range(3):  # for resource, material, and water channels
+                    channel = resource_channels_start + offset
+                    current_quantity = self.map[y, x, channel]
+                    if current_quantity < max_quantity:
+                        self.map[y, x, channel] = min(max_quantity, current_quantity + regeneration_rate)
+
     def step(self, action):
+        turns_counter = 0
         agent = self.agent_selection
         prev_state = self._get_state_snapshot(agent)
         self._process_city_projects(agent)
@@ -370,6 +385,9 @@ class Civilization(AECEnv):
             self.agents.remove(agent)
         
         self.update_state_visit_count(agent, self.visibility_maps[agent])
+        turns_counter += 1
+        if turns_counter == num_agents:
+            self.regenerate_resources()
 
         # Advance to the next agent
         if self.agents:
@@ -377,6 +395,7 @@ class Civilization(AECEnv):
         else:
             self.agent_selection = None
             print("Game done!")
+
         #TODO: DO INFO? 
 
     def update_state_visit_count(self, agent, current_visibility_map):
@@ -931,14 +950,15 @@ class Civilization(AECEnv):
             if np.any(tile_resources > 0):
                 continue  
 
-            # Randomly choose a resource type to place
+            # Randomly choose a resource type to place & random quantity
+            resource_abundance = np.random.randint(1, 21)
             resource_type = np.random.choice(['resource', 'material', 'water'])
             if resource_type == 'resource':
-                self.map[y, x, resources_channel] = 1
+                self.map[y, x, resources_channel] = resource_abundance
             elif resource_type == 'material':
-                self.map[y, x, materials_channel] = 1
+                self.map[y, x, materials_channel] = resource_abundance
             elif resource_type == 'water':
-                self.map[y, x, water_channel] = 1
+                self.map[y, x, water_channel] = resource_abundance
 
             resources_placed += 1
         
@@ -1150,31 +1170,42 @@ class Civilization(AECEnv):
     def _apply_penalty(self, agent, amount):
         self.environmental_impact[agent] += amount
 
-    def _destroy_resource_in_city_tiles(self, agent, city):
+    def _destroy_resource_in_city_tiles(self, agent, city, amount=1):
+        """
+        Instead of completely removing the resource, subtract a given amount from the resource quantity.
+        If the resource quantity falls to 0, it is considered depleted.
+        """
+
         x, y = city.x, city.y
         resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
         resources_channel = resource_channels_start
         materials_channel = resource_channels_start + 1
         water_channel = resource_channels_start + 2
 
-        resource_found = False
-
+        # Try to subtract from each channel
         for channel in [resources_channel, materials_channel, water_channel]:
             if self.map[y, x, channel] > 0:
-                self.map[y, x, channel] = 0
-                resource_found = True
+                self.map[y, x, channel] = max(0, self.map[y, x, channel] - amount)
                 break
 
-        if not resource_found:
-            adjacent_tiles = self._get_adjacent_tiles(x, y)
-            for adj_x, adj_y in adjacent_tiles:
-                for channel in [resources_channel, materials_channel, water_channel]:
-                    if self.map[adj_y, adj_x, channel] > 0:
-                        self.map[adj_y, adj_x, channel] = 0
-                        resource_found = True
-                        break
-                if resource_found:
-                    break
+        # resource_found = False
+
+        # for channel in [resources_channel, materials_channel, water_channel]:
+        #     if self.map[y, x, channel] > 0:
+        #         self.map[y, x, channel] -= 1
+        #         resource_found = True
+        #         break
+
+        # if not resource_found:
+        #     adjacent_tiles = self._get_adjacent_tiles(x, y)
+        #     for adj_x, adj_y in adjacent_tiles:
+        #         for channel in [resources_channel, materials_channel, water_channel]:
+        #             if self.map[adj_y, adj_x, channel] > 0:
+        #                 self.map[adj_y, adj_x, channel] -= 1
+        #                 resource_found = True
+        #                 break
+        #         if resource_found:
+        #             break
 
     def render(self):
         if self.render_mode == 'human':
