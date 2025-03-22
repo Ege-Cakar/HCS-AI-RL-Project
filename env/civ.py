@@ -7,6 +7,7 @@ from pettingzoo.utils.env import AECEnv
 import pygame
 from pygame.locals import QUIT
 import math
+from noise import pnoise2
 
 # TODO: Make sure invalid actions are handled gracefully
 # Example action: 
@@ -75,6 +76,13 @@ class Civilization(AECEnv):
         self.BUY_WARRIOR = 5
         self.BUY_SETTLER = 6
 
+        # Noise parameters
+        self.scale = 50.0   # scaling factor: higher values mean lower frequency (larger features)
+        self.octaves = 4     # number of noise layers for fBm
+        self.persistence = 0.5
+        self.lacunarity = 2.0
+        self.water_level = 0.00
+
         # unit types
 
         self.UNIT_TYPE_MAPPING = { 'warrior': 0, 'settler' : 1 }
@@ -84,7 +92,7 @@ class Civilization(AECEnv):
 
         # Initialize Pygame:
         pygame.init()
-        self.cell_size = 40  # Size of each tile in pixels
+        self.cell_size = 20  # Size of each tile in pixels
         self.window_width = self.map_width * self.cell_size
         self.window_height = self.map_height * self.cell_size
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
@@ -801,7 +809,8 @@ class Civilization(AECEnv):
         ownership_channels = self.num_of_agents  # One channel per agent for ownership
         units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
         resources_channels = 3  # Resources, Materials, Water
-        return ownership_channels + units_channels + resources_channels
+        terrain_channel = 1  # Terrain or seawater
+        return ownership_channels + units_channels + resources_channels + terrain_channel
 
     def _calculate_city_attributes(self):
         """
@@ -839,7 +848,18 @@ class Civilization(AECEnv):
         self._place_starting_units()
 
         # TODO: Implement more complex world generation and spawn point selection?
+        # Generate terrain and seawater
+        self._generate_terrain()
     
+    def _generate_terrain(self):
+        terrain_channel = self._calculate_num_channels() - 1 # Last channel is terrain, to access it subtract one since tensor is zero indexed
+        for i in range(self.map_width):
+            for j in range(self.map_height):
+                x = i / self.scale
+                y = j / self.scale
+                noise_value = pnoise2(x, y, octaves=self.octaves, persistence=self.persistence, lacunarity=self.lacunarity)
+                self.map[j, i, terrain_channel] = 1 if noise_value < self.water_level else 0
+
     def _initialize_projects(self):
         self.projects[0] = {'name': 'Make Warrior', 'duration': 3, 'type': 'unit', 'unit_type': 'warrior'}
         self.projects[1] = {'name': 'Make Settler', 'duration': 5, 'type': 'unit', 'unit_type': 'settler'}
@@ -912,7 +932,9 @@ class Civilization(AECEnv):
         materials_channel = resource_channels_start + 1  # Index for materials
         water_channel = resource_channels_start + 2  # Index for water
 
-        all_tiles = [(x, y) for x in range(self.map_width) for y in range(self.map_height)]
+        # Only consider land tiles (terrain dimension == 1) for resource placement
+        all_tiles = [(x, y) for x in range(self.map_width) for y in range(self.map_height) 
+                    if self.map[y, x, -1] == 1]
         np.random.shuffle(all_tiles)  # Shuffle the list to randomize tile selection
         # POSSIBLE BOTTLENECK!
 
@@ -1221,11 +1243,23 @@ class Civilization(AECEnv):
             #print(f"Agent {agent_idx} can see {len(visible_tiles)} tiles.") # Debugging
             #print(visible_tiles) # Debugging
 
-        
+
     def _draw_grid(self):
         """
-        Draw the grid lines on the screen.
+        Draw the grid lines on the screen and color terrain.
         """
+        # Draw terrain colors first
+        terrain_channel = self.num_of_agents + 3 * self.num_of_agents + 3  # Assuming terrain is after resources
+        for y in range(self.map_height):
+            for x in range(self.map_width):
+                if self.map[y, x, terrain_channel] == 0:  # Water/ocean tiles
+                    rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
+                    pygame.draw.rect(self.screen, (0, 0, 100), rect)  # Dark blue for water
+                else:  # Land tiles
+                    rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
+                    pygame.draw.rect(self.screen, (100, 100, 100), rect)  # Light gray for land
+        
+        # Draw grid lines
         for x in range(0, self.window_width, self.cell_size):
             pygame.draw.line(self.screen, (50, 50, 50), (x, 0), (x, self.window_height))
         for y in range(0, self.window_height, self.cell_size):
@@ -1401,7 +1435,7 @@ class Civilization(AECEnv):
 
 # Testing 
 if __name__ == "__main__":
-    map_size = (20, 30) 
+    map_size = (50, 100) 
     num_agents = 4        
     env = Civilization(map_size, num_agents)
     env.reset()
