@@ -8,6 +8,7 @@ import pygame
 from pygame.locals import QUIT
 import math
 from noise import pnoise2
+import time
 
 # TODO: Make sure invalid actions are handled gracefully
 # Example action: 
@@ -45,6 +46,7 @@ class Civilization(AECEnv):
             raise ValueError(
                 f"Number of players ({num_agents}) exceeds the maximum allowed (6)."
             )
+        self._cumulative_rewards = {agent: 0.0 for agent in self.agents}
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.reset()
         self.num_of_agents = num_agents
@@ -449,6 +451,16 @@ class Civilization(AECEnv):
             unit = self.units[agent][unit_id]
             unit.move(direction)
             self._update_visibility(agent, unit.x, unit.y)
+            # Clear previous motion markers
+            self.map[:, :, self.MOTION_CHANNEL] *= 0.9
+
+            unit = self.units[agent][unit_id]
+            unit.move(direction)
+            self._update_visibility(agent, unit.x, unit.y)
+
+            # Mark motion at the new tile
+            self.map[unit.y, unit.x, self.MOTION_CHANNEL] = 1.0
+
         
     def _handle_attack_unit(self, agent, action):
         unit_id = action['unit_id']
@@ -815,15 +827,35 @@ class Civilization(AECEnv):
                             resources['water'] += 1
             return resources
     
+    # def _calculate_num_channels(self):
+    #     """
+    #     Calculate the number of channels needed for the map representation, which changes dynamically based on number of players.
+    #     """
+    #     ownership_channels = self.num_of_agents  # One channel per agent for ownership
+    #     units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
+    #     resources_channels = 3  # Resources, Materials, Water
+    #     terrain_channel = 1  # Terrain or seawater
+        
+    #     return ownership_channels + units_channels + resources_channels + terrain_channel
+    
     def _calculate_num_channels(self):
-        """
-        Calculate the number of channels needed for the map representation, which changes dynamically based on number of players.
-        """
-        ownership_channels = self.num_of_agents  # One channel per agent for ownership
-        units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
-        resources_channels = 3  # Resources, Materials, Water
-        terrain_channel = 1  # Terrain or seawater
-        return ownership_channels + units_channels + resources_channels + terrain_channel
+        ownership_channels = self.num_of_agents
+        units_channels = 3 * self.num_of_agents
+        resources_channels = 3
+        terrain_channel = 1
+        motion_channel = 1
+        land_use_channel = 1
+
+        self.OWNERSHIP_CHANNEL_START = 0
+        self.UNITS_CHANNEL_START = self.OWNERSHIP_CHANNEL_START + ownership_channels
+        self.RESOURCES_CHANNEL_START = self.UNITS_CHANNEL_START + units_channels
+        self.TERRAIN_CHANNEL = self.RESOURCES_CHANNEL_START + resources_channels
+        self.MOTION_CHANNEL = self.TERRAIN_CHANNEL + 1
+        self.LAND_USE_CHANNEL = self.MOTION_CHANNEL + 1
+
+        total = ownership_channels + units_channels + resources_channels + terrain_channel + motion_channel + land_use_channel
+        return total
+
 
     def _calculate_city_attributes(self):
         """
@@ -1279,6 +1311,8 @@ class Civilization(AECEnv):
             self._draw_grid()
             self._draw_elements()
 
+            self._draw_motion_overlay()
+
             # Overlay visibility
             self._draw_visibility()
 
@@ -1313,6 +1347,16 @@ class Civilization(AECEnv):
             #print(f"Agent {agent_idx} can see {len(visible_tiles)} tiles.") # Debugging
             #print(visible_tiles) # Debugging
 
+    def _draw_motion_overlay(self):
+        for y in range(self.map_height):
+            for x in range(self.map_width):
+                motion = self.map[y, x, self.MOTION_CHANNEL]
+                if motion > 0.01:
+                    overlay = pygame.Surface((self.cell_size, self.cell_size), pygame.SRCALPHA)
+                    alpha = int(255 * min(1.0, motion))
+                    overlay.fill((255, 165, 0, alpha))  # Orange with transparency
+                    self.screen.blit(overlay, (x * self.cell_size, y * self.cell_size))
+
 
     def _draw_grid(self):
         """
@@ -1325,10 +1369,11 @@ class Civilization(AECEnv):
                 if self.map[y, x, terrain_channel] == 0:  # Water/ocean tiles
                     rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                     pygame.draw.rect(self.screen, (0, 0, 100), rect)  # Dark blue for water
+                    # pygame.draw.rect(self.screen, (255, 128, 0), rect)  # Orange overlay for movement
                 else:  # Land tiles
                     rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                     pygame.draw.rect(self.screen, (100, 100, 100), rect)  # Light gray for land
-        
+
         # Draw grid lines
         for x in range(0, self.window_width, self.cell_size):
             pygame.draw.line(self.screen, (50, 50, 50), (x, 0), (x, self.window_height))
@@ -1461,10 +1506,15 @@ class Civilization(AECEnv):
         """
         Reset the environment.
         """
+        self.terminations = {agent: False for agent in self.agents}
+        self.truncations = {agent: False for agent in self.agents}
+        self.rewards = {agent: 0.0 for agent in self.agents}
+        self.dones = {agent: False for agent in self.agents}
+
 
         self.agents = self.possible_agents[:]
-        self.rewards = {agent: 0 for agent in self.agents}
-        self.dones = {agent: False for agent in self.agents}
+        # self.rewards = {agent: 0 for agent in self.agents}
+        # self.dones = {agent: False for agent in self.agents}
         self.infos = {agent: {} for agent in self.agents}
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.reset()
@@ -1504,15 +1554,42 @@ class Civilization(AECEnv):
 
 
 # Testing 
+# if __name__ == "__main__":
+#     map_size = (50, 100) 
+#     num_agents = 4        
+#     env = Civilization(map_size, num_agents)
+#     env.reset()
+#     running = True
+#     while running:
+#         env.render()
+#         for event in pygame.event.get():
+#             if event.type == QUIT:
+#                 running = False
+#     pygame.quit()
 if __name__ == "__main__":
-    map_size = (50, 100) 
-    num_agents = 4        
-    env = Civilization(map_size, num_agents)
+    map_size = (20, 40)  # Smaller = faster rendering
+    num_agents = 4
+    env = Civilization(map_size, num_agents, render_mode="human")
     env.reset()
     running = True
-    while running:
+
+    while running and env.agents:
+        current_agent = env.agent_selection
+
+        # Random action (safe fallback)
+        if not env.terminations[current_agent] and not env.truncations[current_agent]:
+            action = env.action_space(current_agent).sample()
+        else:
+            action = None
+
+        env.step(action)
         env.render()
+
         for event in pygame.event.get():
             if event.type == QUIT:
                 running = False
-    pygame.quit()   
+
+        # time.sleep(0.2)  # Slow it down so you can see
+
+    pygame.quit()
+  
