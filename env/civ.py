@@ -134,6 +134,24 @@ class Civilization(AECEnv):
         # Keep track of how many times each agent visited each tile
         self.state_visit_count = {agent: {} for agent in self.agents}
 
+        # Population growth factor based on money
+        self.population_growth_factor = 0.001 # Example value, tune as needed
+        # Project progress factor based on population
+        self.population_based_progress_factor = 1 # Example value, tune as needed
+
+        # GDP history tracking for dissent calculation
+        self.gdp_history = {agent: [] for agent in self.agents}
+        self.gdp_history_max_length = 5  # Track last 5 turns
+        self.dissent_base_rate = 0.05    # Base dissent rate
+        self.dissent_gdp_sensitivity = 2.0  # How sensitive dissent is to GDP changes
+
+        # Dissent thresholds for negative effects
+        self.DISSENT_PRODUCTIVITY_THRESHOLD = 0.3  # Dissent level where productivity starts to decline
+        self.DISSENT_POPULATION_DECLINE_THRESHOLD = 0.6  # Dissent level where population starts to decline
+        self.DISSENT_REVOLT_THRESHOLD = 0.8  # Dissent level where revolts may occur
+        self.REVOLT_CHANCE = 0.2  # Probability of revolt when above threshold
+        self.POPULATION_DECLINE_RATE = 0.1  # Rate at which population declines when dissent is high
+
         # Tracking variables
         self.previous_states = {agent: None for agent in self.agents}
         self.units_lost = {agent: 0 for agent in self.agents}
@@ -332,6 +350,9 @@ class Civilization(AECEnv):
     def step(self, action):
         agent = self.agent_selection
         prev_state = self._get_state_snapshot(agent)
+        # Update city populations first (before processing actions/projects that might depend on it)
+        self._update_city_population(agent)
+        # Process ongoing city projects
         self._process_city_projects(agent)
         action_type = action['action_type']
         
@@ -358,8 +379,25 @@ class Civilization(AECEnv):
         elif action_type == self.NO_OP:
             pass  # Do nothing
 
+        # Calculate current GDP
+        current_gdp = self._calculate_gdp(agent)
+       
+        # Update GDP history
+        self.gdp_history[agent].append(current_gdp)
+        # Keep only the last N turns in history
+        if len(self.gdp_history[agent]) > self.gdp_history_max_length:
+            self.gdp_history[agent] = self.gdp_history[agent][-self.gdp_history_max_length:]
+
         # Update money (GDP is money per turn)
-        self.money[agent] += self._calculate_gdp(agent)
+        self.money[agent] += current_gdp
+        
+        # Update dissent for all cities
+        for city in self.cities[agent]:
+            city.dissent = self._dissent_calculator(agent, city)
+
+        # Handle city revolts
+        self._handle_city_revolts(agent)
+
         current_state = self._get_state_snapshot(agent)
         self.previous_states[agent] = current_state  # Update previous state
 
@@ -683,7 +721,7 @@ class Civilization(AECEnv):
             if not (0 <= new_x < env.map_width and 0 <= new_y < env.map_height):
                 return None, None
 
-            target = self.env._get_target_at(new_x, new_y)
+            target = env._get_target_at(new_x, new_y)
 
             if target and target.owner != agent:
                 return target.owner, target
@@ -789,6 +827,9 @@ class Civilization(AECEnv):
             self.current_project = None
             self.project_duration = 0
             self.owner = owner
+            self.real_population = 1.0  # Internal decimal population tracker
+            self.population = 1  # Integer population for gameplay purposes
+            self.dissent = 0.0  # Dissent level in the city (0.0 to 1.0)
 
         def _get_resources(self):
             """
@@ -800,7 +841,8 @@ class Civilization(AECEnv):
 
             for dx in range(-scan_range, scan_range + 1):
                 for dy in range(-scan_range, scan_range + 1):
-                    x, y = self.x + dx, self.y + dy
+                    x = self.x + dx
+                    y = self.y + dy
                     if 0 <= x < self.env.map_width and 0 <= y < self.env.map_height:
                         # Check resource channels
                         resource_channels_start = self.env.num_of_agents + 3 * self.env.num_of_agents
@@ -836,9 +878,11 @@ class Civilization(AECEnv):
             - Finished Projects (one-hot for each possible project)
             - Current Project
             - Project Duration
+            - Population
+            - Dissent
         """
         num_projects = self.max_projects  # Placeholder, needs to change
-        return 1 + 2 + 3 + num_projects + 1 + 1  # Health, Location (x, y), Resources(3, 1 for each type), Finished Projects, Current Project, Duration
+        return 1 + 2 + 3 + num_projects + 1 + 1 + 1 + 1  # Health, Location (x, y), Resources(3, 1 for each type), Finished Projects, Current Project, Duration, Population, Dissent
 
     
     def _initialize_map(self, seed=None):
@@ -910,34 +954,82 @@ class Civilization(AECEnv):
         for i in range(self.map_height):
             for j in range(self.map_width):
                 self.map[i, j, terrain_channel] = 1 if noise_map[i, j] > final_threshold else 0
-
-    def _initialize_projects(self):
-        self.projects[0] = {'name': 'Make Warrior', 'duration': 3, 'type': 'unit', 'unit_type': 'warrior'}
-        self.projects[1] = {'name': 'Make Settler', 'duration': 5, 'type': 'unit', 'unit_type': 'settler'}
-        num_remaining_projects = self.max_projects - 2
-        num_friendly_projects = num_remaining_projects // 2
-        num_destructive_projects = num_remaining_projects - num_friendly_projects
-
-        for i in range(num_friendly_projects):
-            project_id = i + 2
-            self.projects[project_id] = {
-                'name': f'Eco Project {i+1}',
-                'duration': 5,
-                'type': 'friendly',
-                'gdp_boost': 12,
-                'penalty': 1
-            }
-
-        for i in range(num_destructive_projects):
-            project_id = i + 2 + num_friendly_projects
-            self.projects[project_id] = {
-                'name': f'Destructive Project {i+1}',
-                'duration': 3,
-                'type': 'destructive',
-                'gdp_boost': 20,
-                'penalty': 5
-            }
-
+    def _dissent_calculator(self, agent, city):
+        """
+        Calculate the dissent level for a city based on GDP growth trends.
+        
+        Args:
+            agent: The agent who owns the city
+            city: The city to calculate dissent for
+            
+        Returns:
+            float: The updated dissent level (0.0 to 1.0)
+        """
+        # If we don't have enough GDP history, use a default low dissent
+        if len(self.gdp_history[agent]) < 2:
+            return max(0.0, city.dissent - 0.01)  # Slight decrease in dissent when history is insufficient
+        
+        # Calculate average GDP growth over available history (up to 5 turns)
+        gdp_changes = []
+        for i in range(1, len(self.gdp_history[agent])):
+            prev_gdp = self.gdp_history[agent][i-1]
+            curr_gdp = self.gdp_history[agent][i]
+            if prev_gdp > 0:  # Avoid division by zero
+                percent_change = (curr_gdp - prev_gdp) / prev_gdp
+                gdp_changes.append(percent_change)
+            else:
+                gdp_changes.append(0.0)
+                
+        # Calculate average GDP growth
+        avg_gdp_growth = sum(gdp_changes) / len(gdp_changes) if gdp_changes else 0.0
+        
+        # Calculate dissent change based on GDP growth
+        # Negative growth increases dissent, positive growth decreases it
+        dissent_change = self.dissent_base_rate - (avg_gdp_growth * self.dissent_gdp_sensitivity)
+        
+        # Population factor: larger populations generate more dissent when economy is bad
+        population_factor = 1.0 + (city.population - 1) * 0.1  # Each population point above 1 adds 10% to dissent
+        dissent_change *= population_factor
+        
+        # Update dissent level, keeping it between 0.0 and 1.0
+        new_dissent = city.dissent + dissent_change
+        return max(0.0, min(1.0, new_dissent))
+    
+    def _handle_city_revolts(self, agent):
+        """
+        Check for and handle city revolts based on dissent levels.
+        Revolts can destroy completed projects when dissent is too high.
+        
+        Args:
+            agent: The agent whose cities might revolt
+            
+        Returns:
+            list: List of cities that revolted
+        """
+        revolted_cities = []
+        
+        for city in self.cities[agent]:
+            # Check if dissent is above revolt threshold
+            if city.dissent >= self.DISSENT_REVOLT_THRESHOLD:
+                # Determine if revolt happens (random chance)
+                if np.random.random() < self.REVOLT_CHANCE:
+                    # City is revolting! Destroy one completed project if any exist
+                    completed_project_indices = [i for i, completed in enumerate(city.completed_projects) if completed == 1]
+                    
+                    if completed_project_indices:
+                        # Randomly select one completed project to destroy
+                        project_to_destroy = np.random.choice(completed_project_indices)
+                        city.completed_projects[project_to_destroy] = 0
+                        
+                        # Record the revolt
+                        revolted_cities.append(city)
+                        
+                        # Slightly reduce dissent after revolt (people vented their frustrations)
+                        city.dissent = max(0.5, city.dissent - 0.2)
+                        
+                        # Optional: Add a message or log
+                        print(f"REVOLT in city at ({city.x}, {city.y}) of agent {agent}! Project {project_to_destroy} was destroyed.")
+        return revolted_cities
 
     def _get_agent_cities(self, agent):
         num_attributes = self._calculate_city_attributes()
@@ -954,12 +1046,23 @@ class Civilization(AECEnv):
                 city.resources.get('material', 0),  # Material
                 city.resources.get('water', 0),      # Water
             ]
-            finished_projects = city.completed_projects
+            finished_projects = city.completed_projects # This should be a list/array of size max_projects
             city_data.extend(finished_projects)
-            city_data.append(city.current_project if city.current_project is not None else -1)
-            city_data.append(city.project_duration)
-            cities_obs[idx] = city_data[:num_attributes]
-        
+            city_data.append(city.current_project if city.current_project is not None else -1) # Current project ID
+            city_data.append(city.project_duration) # Remaining duration
+            city_data.append(city.population) # Add population
+            city_data.append(city.dissent) # Add dissent
+            
+            # Ensure city_data matches the expected number of attributes before assigning
+            if len(city_data) == num_attributes:
+                 cities_obs[idx] = city_data
+            else:
+                # Handle error or pad if necessary, logging a warning might be good
+                print(f"Warning: Mismatch in city attributes for agent {agent}, city {idx}. Expected {num_attributes}, got {len(city_data)}")
+                # Pad with zeros or default values up to num_attributes
+                padded_data = city_data + [-1] * (num_attributes - len(city_data)) # Using -1 as padding
+                cities_obs[idx] = padded_data[:num_attributes] # Truncate just in case something went very wrong
+
         return cities_obs
 
     def _update_visibility(self, agent, unit_x, unit_y):
@@ -1196,11 +1299,60 @@ class Civilization(AECEnv):
     def _process_city_projects(self, agent):
         for city in self.cities[agent]:
             if city.current_project is not None:
-                city.project_duration -= 1
+                # Calculate progress based on population
+                progress_this_turn = self.population_based_progress_factor * city.population
+                
+                # Apply productivity penalty based on dissent level
+                if city.dissent >= self.DISSENT_PRODUCTIVITY_THRESHOLD:
+                    # Calculate penalty factor (ranges from 0 to 1, where 1 means no penalty)
+                    # At DISSENT_PRODUCTIVITY_THRESHOLD, penalty is minimal
+                    # At dissent=1.0, penalty reduces productivity by up to 80%
+                    dissent_penalty = 1.0 - 0.8 * ((city.dissent - self.DISSENT_PRODUCTIVITY_THRESHOLD) / 
+                                             (1.0 - self.DISSENT_PRODUCTIVITY_THRESHOLD))
+                    # Apply the penalty
+                    progress_this_turn *= max(0.2, dissent_penalty)  # Ensure at least 20% productivity remains
+                
+                city.project_duration -= progress_this_turn
                 if city.project_duration <= 0:
                     project_id = city.current_project
                     self._complete_project(agent, city, project_id)
                     city.current_project = None
+
+    def _update_city_population(self, agent):
+        """
+        Update the population of each city for the given agent based on the agent's current money.
+        Population increases by a base amount plus an amount proportional to money.
+        Population may decrease when dissent is high.
+        """
+        base_growth = 0.01 # Small base growth per turn, tune as needed
+        money_based_growth_factor = self.population_growth_factor # Defined in __init__
+
+        for city in self.cities[agent]:
+            # Check if dissent is high enough to cause population decline
+            if city.dissent >= self.DISSENT_POPULATION_DECLINE_THRESHOLD:
+                # Calculate population decline based on how far above threshold
+                decline_severity = (city.dissent - self.DISSENT_POPULATION_DECLINE_THRESHOLD) / (1.0 - self.DISSENT_POPULATION_DECLINE_THRESHOLD)
+                population_decline = self.POPULATION_DECLINE_RATE * decline_severity * city.population
+                
+                # Apply decline to real_population, but ensure it doesn't go below 1.0
+                city.real_population = max(1.0, city.real_population - population_decline)
+                
+                # Update integer population immediately if it decreased
+                new_population = int(city.real_population)
+                if new_population < city.population:
+                    city.population = max(1, new_population)  # Ensure at least 1 population remains
+                    print(f"Population DECLINED in city at ({city.x}, {city.y}) of agent {agent} due to high dissent!")
+            else:
+                # Normal population growth when dissent is below threshold
+                # Calculate growth based on agent's money
+                money_bonus = self.money[agent] * money_based_growth_factor
+                total_growth = base_growth + money_bonus
+                # Update the internal decimal population tracker
+                city.real_population += total_growth
+                # Update the integer population only when the real population crosses an integer threshold
+                new_population = int(city.real_population)
+                if new_population > city.population:
+                    city.population = new_population
 
     def _complete_project(self, agent, city, project_id):
         project = self.projects[project_id]
@@ -1209,6 +1361,7 @@ class Civilization(AECEnv):
             x, y = city.x, city.y
             placed = self._place_unit_near_city(agent, unit_type, x, y)
             if not placed:
+                # Handle case where no adjacent empty tile is found
                 pass
         elif project['type'] == 'friendly':
             if city.completed_projects[project_id] == 0:
@@ -1357,7 +1510,7 @@ class Civilization(AECEnv):
         for y in range(self.map_height):
             for x in range(self.map_width):
                 for agent_idx in range(self.num_of_agents):
-                    if self.map[y, x, agent_idx] == 1:
+                    if self.map[y, x, agent_idx] > 0:
                         color = agent_colors[agent_idx % len(agent_colors)]
                         rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                         pygame.draw.rect(self.screen, color, rect)
@@ -1471,6 +1624,9 @@ class Civilization(AECEnv):
         self.units = {agent: [] for agent in self.agents}
         self.cities = {agent: [] for agent in self.agents}
         self.gdp_bonus = {agent: 0 for agent in self.agents}
+        self.money = {agent: 0 for agent in self.agents}
+        # Reset GDP history
+        self.gdp_history = {agent: [] for agent in self.agents}
         
         self._initialize_map()
 
@@ -1491,7 +1647,6 @@ class Civilization(AECEnv):
         self.cities_lost = {agent: 0 for agent in self.agents}
         self.cities_captured = {agent: 0 for agent in self.agents}
         self.resources_gained = {agent: 0 for agent in self.agents}
-        self.money = {agent: 0 for agent in self.agents}  # Reset money for each agent
 
         observations = {agent: self.observe(agent) for agent in self.agents}
 
