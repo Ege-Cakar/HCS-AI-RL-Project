@@ -199,10 +199,16 @@ class Civilization(AECEnv):
             "invade_x": spaces.Discrete(map_size[1]),  # X coordinate to invade
             "invade_y": spaces.Discrete(map_size[0])   # Y coordinate to invade
         }) for agent in self.agents}
+        
         self.disaster_frequency = disaster_frequency  # Probability of disaster per step
         self.disaster_radius = disaster_radius  # Radius of effect for disasters
         self.disaster_locations = []  # Track recent disaster locations for rendering
         self.disaster_fade_time = 10  # How many steps disaster effects remain visible
+
+
+        self.aggression_factor = 1.0
+        self.replenish_rate = 0.25
+        self.disaster_frequency = 0.1   
     
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -1582,6 +1588,22 @@ class Civilization(AECEnv):
                 if resource_found:
                     break
 
+    def _draw_ui_overlay(self):
+        font = pygame.font.SysFont(None, 24)
+
+        # top-left corner values
+        label_agg = font.render(f"Aggression: {self.aggression_factor:.2f}", True, (255, 255, 255))
+        self.screen.blit(label_agg, (10, 10))
+
+        label_replenish = font.render(f"Replenish Rate: {self.replenish_rate:.2f}", True, (255, 255, 255))
+        self.screen.blit(label_replenish, (10, 40))
+
+        label_disaster = font.render(f"Disaster Freq: {self.disaster_frequency:.2f}", True, (255, 255, 255))
+        self.screen.blit(label_disaster, (10, 70))
+
+        # add dissent values, revolt thresholds, etc. later
+
+
     def render(self):
         if self.render_mode == 'human':
             for event in pygame.event.get():
@@ -1595,14 +1617,12 @@ class Civilization(AECEnv):
             # Draw the grid and elements
             self._draw_grid()
             self._draw_elements()
-
             self._draw_motion_overlay()
-
-            # Overlay visibility
             self._draw_visibility()
+            self._draw_ui_overlay() # added
 
             pygame.display.flip()
-            self.clock.tick(120)  # Limit to 60 fps
+            self.clock.tick(120) 
         else:
             pass
 
