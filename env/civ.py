@@ -75,7 +75,59 @@ class Civilization(AECEnv):
         self.NO_OP = 4
         self.BUY_WARRIOR = 5
         self.BUY_SETTLER = 6
-
+        self.CHANGE_GOVERNMENT = 7  # New action type for changing government
+        
+        # Government types
+        self.DEMOCRACY = 0
+        self.AUTOCRACY = 1
+        self.THEOCRACY = 2
+        self.COMMUNISM = 3
+        
+        # Government effects (all values are tunable)
+        self.government_effects = {
+            self.DEMOCRACY: {
+                'project_duration_modifier': 1.25,  # Projects take 25% longer
+                'gdp_modifier': 1.25,  # 25% increase in GDP
+                'unit_health_modifier': 1.0,  # No change to unit health
+                'attack_power_modifier': 1.0,  # No change to attack power
+                'dissent_modifier': 0.8,  # 20% less dissent
+                'revolt_chance_modifier': 0.7,  # 30% less revolt chance
+                'unit_multiplication': 1,  # Normal unit production
+            },
+            self.AUTOCRACY: {
+                'project_duration_modifier': 1.0,  # No change to project duration
+                'gdp_modifier': 1.0,  # No change to GDP
+                'unit_health_modifier': 1.25,  # 25% increase in unit health
+                'attack_power_modifier': 1.1,  # 10% increase in attack power
+                'dissent_modifier': 1.3,  # 30% more dissent
+                'revolt_chance_modifier': 1.5,  # 50% more revolt chance
+                'unit_multiplication': 1,  # Normal unit production
+            },
+            self.THEOCRACY: {
+                'project_duration_modifier': 1.0,  # No change to project duration
+                'gdp_modifier': 0.75,  # 25% decrease in GDP
+                'unit_health_modifier': 1.0,  # No change to unit health
+                'attack_power_modifier': 1.0,  # No change to attack power
+                'dissent_modifier': 1.0,  # No change to dissent
+                'revolt_chance_modifier': 1.0,  # No change to revolt chance
+                'unit_multiplication': 2,  # Double unit production for warriors and settlers
+            },
+            self.COMMUNISM: {
+                'project_duration_modifier': 0.75,  # Projects take 25% less time
+                'gdp_modifier': 0.8,  # 25% decrease in GDP
+                'unit_health_modifier': 1.0,  # No change to unit health
+                'attack_power_modifier': 1.0,  # No change to attack power
+                'dissent_modifier': 1,  # No change to dissent
+                'revolt_chance_modifier': 1,  # No change to revolt chance
+                'unit_multiplication': 1,  # Normal unit production
+            }
+        }
+        
+        # Initialize agent governments and cooldown
+        self.agent_governments = {agent: self.AUTOCRACY for agent in self.agents}  # Default to Autocracy
+        self.gov_change_cooldown = {agent: 0 for agent in self.agents}  # Tracks turns since last change
+        self.gov_change_frequency = 10  # Can change government every 10 turns
+        
         # Noise parameters
         self.scale = 50.0   # scaling factor: higher values mean lower frequency (larger features)
         self.octaves = 4     # number of noise layers for fBm
@@ -146,11 +198,11 @@ class Civilization(AECEnv):
         self.dissent_gdp_sensitivity = 2.0  # How sensitive dissent is to GDP changes
 
         # Dissent thresholds for negative effects
-        self.DISSENT_PRODUCTIVITY_THRESHOLD = 0.3  # Dissent level where productivity starts to decline
-        self.DISSENT_POPULATION_DECLINE_THRESHOLD = 0.6  # Dissent level where population starts to decline
-        self.DISSENT_REVOLT_THRESHOLD = 0.8  # Dissent level where revolts may occur
+        self.DISSENT_PRODUCTIVITY_THRESHOLD = 0.45  # Dissent level where productivity starts to decline
+        self.DISSENT_POPULATION_DECLINE_THRESHOLD = 0.75  # Dissent level where population starts to decline
+        self.DISSENT_REVOLT_THRESHOLD = 0.85  # Dissent level where revolts may occur
         self.REVOLT_CHANCE = 0.2  # Probability of revolt when above threshold
-        self.POPULATION_DECLINE_RATE = 0.1  # Rate at which population declines when dissent is high
+        self.POPULATION_DECLINE_RATE = 0.2  # Rate at which population declines when dissent is high
 
         # Tracking variables
         self.previous_states = {agent: None for agent in self.agents}
@@ -190,14 +242,17 @@ class Civilization(AECEnv):
                 high=np.inf,
                 shape=(1,),
                 dtype=np.float32
-            )
+            ),
+            "government": spaces.Discrete(4),  # Four government types
+            "can_change_government": spaces.Discrete(2)  # 0: cannot change, 1: can change
         }) for agent in self.agents}
         self.action_spaces = {agent : spaces.Dict({
-            "action_type": spaces.Discrete(7),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER
-            "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
-            "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
-            "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
-            "project_id": spaces.Discrete(self.max_projects)       # For ASSIGN_PROJECT
+            "action_type": spaces.Discrete(8),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER, 7: CHANGE_GOVERNMENT    
+            "unit_id": spaces.Discrete(self.max_units_per_agent),  # Only if moving a unit
+            "direction": spaces.Discrete(4),  # Direction to move
+            "city_id": spaces.Discrete(self.max_cities),  # Only if founding a city
+            "project_id": spaces.Discrete(self.max_projects),  # Only if assigning a project
+            "target_government": spaces.Discrete(4)  # Only if changing government
         }) for agent in self.agents}
     
     def observation_space(self, agent):
@@ -338,12 +393,18 @@ class Civilization(AECEnv):
         # Include money in the observation
         money_obs = np.array([self.money[agent]], dtype=np.float32)
 
+        # Get government information
+        government = self.agent_governments[agent]
+        can_change_government = 1 if self.gov_change_cooldown[agent] >= self.gov_change_frequency else 0
+
         # Return the observation dictionary
         observation = {
             "map": masked_map,
             "units": units_obs,
             "cities": cities_obs,
-            "money": money_obs
+            "money": money_obs,
+            "government": government,
+            "can_change_government": can_change_government
         }
         return observation
 
@@ -368,6 +429,9 @@ class Civilization(AECEnv):
         elif action_type == self.ASSIGN_PROJECT:
             self._handle_assign_project(agent, action)
         
+        elif action_type == self.NO_OP:
+            pass
+        
         elif action_type == self.BUY_WARRIOR:
             city_id = action['city_id']
             self._handle_buy_warrior(agent, city_id)
@@ -375,10 +439,14 @@ class Civilization(AECEnv):
         elif action_type == self.BUY_SETTLER:
             city_id = action['city_id']
             self._handle_buy_settler(agent, city_id)
+            
+        elif action_type == self.CHANGE_GOVERNMENT:
+            target_government = action['target_government']
+            self._handle_change_government(agent, target_government)
         
-        elif action_type == self.NO_OP:
-            pass  # Do nothing
-
+        else:
+            pass
+        
         # Calculate current GDP
         current_gdp = self._calculate_gdp(agent)
        
@@ -392,8 +460,7 @@ class Civilization(AECEnv):
         self.money[agent] += current_gdp
         
         # Update dissent for all cities
-        for city in self.cities[agent]:
-            city.dissent = self._dissent_calculator(agent, city)
+        self._update_city_dissent(agent)
 
         # Handle city revolts
         self._handle_city_revolts(agent)
@@ -420,6 +487,10 @@ class Civilization(AECEnv):
         # Advance to the next agent
         if self.agents:
             self.agent_selection = self._agent_selector.next()
+            
+            # If we've gone through all agents, update government cooldowns
+            if self.agent_selection == self.agents[0]:
+                self._update_government_cooldowns()
         else:
             self.agent_selection = None
             print("Game done!")
@@ -458,11 +529,21 @@ class Civilization(AECEnv):
         return state
     
     def _calculate_gdp(self, agent):
-        # Maybe a linear combination of units and cities owned? 
-        gdp = len(self.cities[agent]) * 2 + self.gdp_bonus[agent] # + len(self.units[agent]) * 1 
-        # add a factor for the resources controlled?
-        # maybe slight randomness? would that help? 
-        return gdp
+        """Calculate the GDP for the agent based on total resources, population, etc."""
+        total_resources = sum(
+            city.resources.get('resource', 0) + city.resources.get('material', 0) + city.resources.get('water', 0)
+            for city in self.cities[agent]
+        )
+        total_population = sum(city.population for city in self.cities[agent])
+        
+        # Apply government GDP modifier
+        gov_type = self.agent_governments[agent]
+        gdp_modifier = self.government_effects[gov_type]['gdp_modifier']
+        
+        # Base GDP is population * resources, but we add a small base value (1) to avoid zero GDP
+        base_gdp = max(1, total_population * total_resources)
+        
+        return (base_gdp + self.gdp_bonus[agent]) * gdp_modifier
 
     def _calculate_energy_output(self, agent):
         # Sum up the resource values for each city
@@ -606,15 +687,19 @@ class Civilization(AECEnv):
 
             if target is not None:
                 #print(f"{self.owner}'s warrior at ({self.x}, {self.y}) attacks {target_agent}'s {target.type} at ({target.x}, {target.y}).")
+                # Apply government attack power modifier
+                gov_type = self.env.agent_governments[self.owner]
+                attack_modifier = self.env.government_effects[gov_type]['attack_power_modifier']
+                attack_damage = int(35 * attack_modifier)  # Base damage is 35
+                
                 # Inflict damage
-                target.health -= 35
+                target.health -= attack_damage
                 #print(f"Target's health is now {target.health}.")
                 self.env.last_attacker = self.owner
                 self.env.last_target_destroyed = False
 
-                # Check if the target is destroyed
                 if target.health <= 0:
-                    #print(f"Target {target.type} at ({target.x}, {target.y}) has been destroyed.")
+                    #print(f"{target_agent}'s {target.type} at ({target.x}, {target.y}) is destroyed!")
                     self.env.last_target_destroyed = True
                     self.env._remove_unit_or_city(target)
                     # Update tracking variables
@@ -624,6 +709,9 @@ class Civilization(AECEnv):
                     elif isinstance(target, self.env.City):
                         self.env.cities_captured[self.owner] += 1
                         self.env.cities_lost[target.owner] += 1
+                else:
+                    #print(f"Target's health is now {target.health}.")
+                    pass
             else:
                 #print(f"No enemy to attack in direction {direction} from ({self.x}, {self.y}).")
                 pass
@@ -721,7 +809,7 @@ class Civilization(AECEnv):
             if not (0 <= new_x < env.map_width and 0 <= new_y < env.map_height):
                 return None, None
 
-            target = env._get_target_at(new_x, new_y)
+            target = self.env._get_target_at(new_x, new_y)
 
             if target and target.owner != agent:
                 return target.owner, target
@@ -995,6 +1083,32 @@ class Civilization(AECEnv):
         new_dissent = city.dissent + dissent_change
         return max(0.0, min(1.0, new_dissent))
     
+    def _initialize_projects(self):
+        self.projects[0] = {'name': 'Make Warrior', 'duration': 3, 'type': 'unit', 'unit_type': 'warrior'}
+        self.projects[1] = {'name': 'Make Settler', 'duration': 5, 'type': 'unit', 'unit_type': 'settler'}
+        num_remaining_projects = self.max_projects - 2
+        num_friendly_projects = num_remaining_projects // 2
+        num_destructive_projects = num_remaining_projects - num_friendly_projects
+
+        for i in range(num_friendly_projects):
+            project_id = i + 2
+            self.projects[project_id] = {
+                'name': f'Eco Project {i+1}',
+                'duration': 5,
+                'type': 'friendly',
+                'gdp_boost': 12,
+                'penalty': 1
+            }
+
+        for i in range(num_destructive_projects):
+            project_id = i + 2 + num_friendly_projects
+            self.projects[project_id] = {
+                'name': f'Destructive Project {i+1}',
+                'duration': 3,
+                'type': 'destructive',
+                'gdp_boost': 20,
+                'penalty': 5
+            }
     def _handle_city_revolts(self, agent):
         """
         Check for and handle city revolts based on dissent levels.
@@ -1008,12 +1122,17 @@ class Civilization(AECEnv):
         """
         revolted_cities = []
         
+        # Apply government revolt chance modifier
+        gov_type = self.agent_governments[agent]
+        revolt_modifier = self.government_effects[gov_type]['revolt_chance_modifier']
+        revolt_chance = self.REVOLT_CHANCE * revolt_modifier
+        
         for city in self.cities[agent]:
             # Check if dissent is above revolt threshold
             if city.dissent >= self.DISSENT_REVOLT_THRESHOLD:
                 # Determine if revolt happens (random chance)
-                if np.random.random() < self.REVOLT_CHANCE:
-                    # City is revolting! Destroy one completed project if any exist
+                if np.random.random() < revolt_chance:
+                    # Find a completed project to destroy
                     completed_project_indices = [i for i, completed in enumerate(city.completed_projects) if completed == 1]
                     
                     if completed_project_indices:
@@ -1025,12 +1144,11 @@ class Civilization(AECEnv):
                         revolted_cities.append(city)
                         
                         # Slightly reduce dissent after revolt (people vented their frustrations)
-                        city.dissent = max(0.5, city.dissent - 0.2)
+                        city.dissent = max(0.5, city.dissent - 0.3)
                         
                         # Optional: Add a message or log
                         print(f"REVOLT in city at ({city.x}, {city.y}) of agent {agent}! Project {project_to_destroy} was destroyed.")
         return revolted_cities
-
     def _get_agent_cities(self, agent):
         num_attributes = self._calculate_city_attributes()
         cities_obs = np.zeros((self.max_cities, num_attributes), dtype=np.float32)
@@ -1225,7 +1343,6 @@ class Civilization(AECEnv):
             if self.map[y, x, agent_idx] > 0:
                 tile_info['ownership'] = agent
                 break  # Only one agent can own a tile
-
         # Check units
         for agent in self.agents:
             for unit in self.units[agent]:
@@ -1253,29 +1370,44 @@ class Civilization(AECEnv):
 
         return tile_info
 
-    def _place_unit(self, agent_idx, unit_type, x, y):
+    def _place_unit(self, agent, unit_type, x, y):
         """
-        Place a unit of a specific type for a given agent at the specified location.
+        Place a unit on the map for a specific agent.
+        
         Args:
-            agent_idx: Index of the agent.
-            unit_type: 'city', 'warrior', or 'settler'.
-            x, y: Coordinates to place the unit.
+            agent: The agent who will own the unit.
+            unit_type: The type of unit to place.
+            x, y: Coordinates where the unit will be placed.
         """
-        unit_types = {'city': 0, 'warrior': 1, 'settler': 2}
-        if unit_type not in unit_types:
-            pass  # Handle invalid unit type
-        unit_channel = self.num_of_agents + (3 * agent_idx) + unit_types[unit_type]
+        new_unit = self.Unit(x, y, unit_type, agent, self)
+        
+        # Apply government health modifier for new units if it's a warrior
+        if unit_type == 'warrior':
+            gov_type = self.agent_governments[agent]
+            health_modifier = self.government_effects[gov_type]['unit_health_modifier']
+            new_unit.health = int(new_unit.health * health_modifier)
+        
+        self.units[agent].append(new_unit)
+        
+        # Update the map to show the new unit
+        agent_idx = self.agents.index(agent)
+        if unit_type == 'warrior':
+            # Place in warrior channel
+            unit_channel = self.num_of_agents + (3 * agent_idx) + 1
+        elif unit_type == 'settler':
+            # Place in settler channel
+            unit_channel = self.num_of_agents + (3 * agent_idx) + 2
+        
         self.map[y, x, unit_channel] = 1
-        # Create a Unit instance and add it to the agent's unit list
-        unit = self.Unit(x, y, unit_type, self.agents[agent_idx], self)
-        self.units[self.agents[agent_idx]].append(unit)
-        self._update_visibility(self.agents[agent_idx], x, y)
+        
+        # Update visibility map for the agent
+        self._update_visibility(agent, x, y)
     
     def _place_unit_near_city(self, agent, unit_type, x, y):
         adjacent_tiles = self._get_adjacent_tiles(x, y)
         for adj_x, adj_y in adjacent_tiles:
             if self._is_tile_empty(adj_x, adj_y) and self._is_land_tile(adj_x, adj_y):
-                self._place_unit(self.agents.index(agent), unit_type, adj_x, adj_y)
+                self._place_unit(agent, unit_type, adj_x, adj_y)
                 return True
         return False
 
@@ -1296,26 +1428,68 @@ class Civilization(AECEnv):
                     adjacent_coords.append((adj_x, adj_y))
         return adjacent_coords
 
+    def _handle_change_government(self, agent, target_government):
+        """
+        Handle the government change action for an agent.
+        
+        Args:
+            agent: The agent changing government
+            target_government: The government type to change to
+        """
+        # Check if cooldown period has passed
+        if self.gov_change_cooldown[agent] >= self.gov_change_frequency:
+            # Check if target government is valid
+            if target_government in [self.DEMOCRACY, self.AUTOCRACY, self.THEOCRACY, self.COMMUNISM]:
+                # Change government
+                self.agent_governments[agent] = target_government
+                # Reset cooldown
+                self.gov_change_cooldown[agent] = 0
+                print(f"Agent {agent} changed government to {self._government_name(target_government)}")
+        else:
+            # Cannot change government yet
+            print(f"Agent {agent} cannot change government yet. {self.gov_change_frequency - self.gov_change_cooldown[agent]} turns remaining.")
+            
+    def _government_name(self, gov_type):
+        """Return the string name of a government type"""
+        gov_names = {
+            self.DEMOCRACY: "Democracy",
+            self.AUTOCRACY: "Autocracy",
+            self.THEOCRACY: "Theocracy",
+            self.COMMUNISM: "Communism"
+        }
+        return gov_names.get(gov_type, "Unknown")
+        
+    def _update_government_cooldowns(self):
+        """Update the cooldown timers for all agents"""
+        for agent in self.agents:
+            self.gov_change_cooldown[agent] = min(
+                self.gov_change_cooldown[agent] + 1,
+                self.gov_change_frequency
+            )
+    
     def _process_city_projects(self, agent):
+        """
+        Process projects in progress for the agent's cities.
+        
+        Args:
+            agent: The agent whose cities' projects will be processed.
+        """
         for city in self.cities[agent]:
             if city.current_project is not None:
-                # Calculate progress based on population
-                progress_this_turn = self.population_based_progress_factor * city.population
+                # Apply government project duration modifier
+                gov_type = self.agent_governments[agent]
+                project_modifier = self.government_effects[gov_type]['project_duration_modifier']
                 
-                # Apply productivity penalty based on dissent level
-                if city.dissent >= self.DISSENT_PRODUCTIVITY_THRESHOLD:
-                    # Calculate penalty factor (ranges from 0 to 1, where 1 means no penalty)
-                    # At DISSENT_PRODUCTIVITY_THRESHOLD, penalty is minimal
-                    # At dissent=1.0, penalty reduces productivity by up to 80%
-                    dissent_penalty = 1.0 - 0.8 * ((city.dissent - self.DISSENT_PRODUCTIVITY_THRESHOLD) / 
-                                             (1.0 - self.DISSENT_PRODUCTIVITY_THRESHOLD))
-                    # Apply the penalty
-                    progress_this_turn *= max(0.2, dissent_penalty)  # Ensure at least 20% productivity remains
+                # Progress increments by 1/duration each turn, but is modified by government
+                project_progress = 1.0 / city.project_duration / project_modifier
                 
-                city.project_duration -= progress_this_turn
+                # Also scale by city population
+                project_progress *= (1 + (city.population - 1) * self.population_based_progress_factor)
+                
+                city.project_duration -= project_progress
+                
                 if city.project_duration <= 0:
-                    project_id = city.current_project
-                    self._complete_project(agent, city, project_id)
+                    self._complete_project(agent, city, city.current_project)
                     city.current_project = None
 
     def _update_city_population(self, agent):
@@ -1354,12 +1528,73 @@ class Civilization(AECEnv):
                 if new_population > city.population:
                     city.population = new_population
 
+    def _update_city_dissent(self, agent):
+        """
+        Update the dissent level for all cities owned by this agent.
+        Dissent is affected by GDP changes, overcrowding, etc.
+        
+        Args:
+            agent: The agent whose cities' dissent will be updated
+        """
+        # Get base dissent rate and modify based on government
+        gov_type = self.agent_governments[agent]
+        dissent_modifier = self.government_effects[gov_type]['dissent_modifier']
+        base_dissent = self.dissent_base_rate * dissent_modifier
+        
+        current_gdp = self._calculate_gdp(agent)
+        
+        # Update GDP history
+        self.gdp_history[agent].append(current_gdp)
+        if len(self.gdp_history[agent]) > self.gdp_history_max_length:
+            self.gdp_history[agent].pop(0)
+        
+        # Calculate GDP trend if enough history exists
+        gdp_trend = 0
+        if len(self.gdp_history[agent]) >= 2:
+            gdp_trend = self.gdp_history[agent][-1] - self.gdp_history[agent][0]
+            gdp_trend = gdp_trend / max(1, self.gdp_history[agent][0])  # Normalized change
+        
+        # Adjust dissent for all cities
+        for city in self.cities[agent]:
+            # Base dissent generation
+            city.dissent += base_dissent
+            
+            # GDP-based dissent adjustment
+            if gdp_trend < 0:
+                # Negative GDP trend increases dissent
+                city.dissent += abs(gdp_trend) * self.dissent_gdp_sensitivity
+            else:
+                # Positive GDP trend decreases dissent
+                city.dissent -= gdp_trend * (self.dissent_gdp_sensitivity / 2)
+            
+            # Population density effect (more people = more dissent)
+            population_factor = max(0, (city.population - 5) / 10)  # Starts adding dissent after population 5
+            city.dissent += population_factor * 0.05
+            
+            # Ensure dissent stays within bounds
+            city.dissent = max(0.0, min(1.0, city.dissent))
+    
     def _complete_project(self, agent, city, project_id):
         project = self.projects[project_id]
         if project['type'] == 'unit':
             unit_type = project['unit_type']
             x, y = city.x, city.y
+            
+            # Get government unit multiplication effect
+            gov_type = self.agent_governments[agent]
+            unit_multiplication = self.government_effects[gov_type]['unit_multiplication']
+            
+            # Create the normal unit
             placed = self._place_unit_near_city(agent, unit_type, x, y)
+            
+            # If Theocracy, potentially create additional units
+            if unit_multiplication > 1:
+                for _ in range(unit_multiplication - 1):
+                    additional_placed = self._place_unit_near_city(agent, unit_type, x, y)
+                    if not additional_placed:
+                        # Handle case where no adjacent empty tile is found
+                        break
+                    
             if not placed:
                 # Handle case where no adjacent empty tile is found
                 pass
@@ -1628,6 +1863,10 @@ class Civilization(AECEnv):
         # Reset GDP history
         self.gdp_history = {agent: [] for agent in self.agents}
         
+        # Reset government information
+        self.agent_governments = {agent: self.AUTOCRACY for agent in self.agents}  # Default to Autocracy
+        self.gov_change_cooldown = {agent: 0 for agent in self.agents}
+        
         self._initialize_map()
 
         # Reset visibility maps
@@ -1657,7 +1896,6 @@ class Civilization(AECEnv):
 
         return observations
 
-
 # Testing 
 if __name__ == "__main__":
     map_size = (50, 100) 
@@ -1670,4 +1908,4 @@ if __name__ == "__main__":
         for event in pygame.event.get():
             if event.type == QUIT:
                 running = False
-    pygame.quit()   
+    #pygame.quit()   
