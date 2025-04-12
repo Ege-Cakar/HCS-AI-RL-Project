@@ -23,7 +23,7 @@ import time
 
 class Civilization(AECEnv): 
     metadata = {'render_modes': ['human'], 'name': 'Civilization_v0'}
-    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', *args, **kwargs):
+    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', disaster_frequency=0.01, disaster_radius=2, *args, **kwargs):
         """
         Initialize the Civilization game.
         Args:
@@ -77,7 +77,12 @@ class Civilization(AECEnv):
         self.NO_OP = 4
         self.BUY_WARRIOR = 5
         self.BUY_SETTLER = 6
-
+        self.HARVEST_RESOURCES = 7
+        self.PROPOSE_TRADE = 8
+        self.ACCEPT_TRADE = 9
+        self.REJECT_TRADE = 10
+        self.INVADE_TERRITORY = 11
+        
         # Noise parameters
         self.scale = 50.0   # scaling factor: higher values mean lower frequency (larger features)
         self.octaves = 4     # number of noise layers for fBm
@@ -136,6 +141,7 @@ class Civilization(AECEnv):
         self.k8 = 50.0 # Change in GDP
         self.k9 = 50.0  # Change in Energy output
         self.k10 = 35.0 # Resources gained
+        self.k11 = 75.0  # Reward for successful territory invasion
         self.gamma = 0.00001  # Environmental impact penalty
         self.beta = 0.5
 
@@ -152,6 +158,8 @@ class Civilization(AECEnv):
         self.cities_lost = {agent: 0 for agent in self.agents}
         self.cities_captured = {agent: 0 for agent in self.agents}
         self.resources_gained = {agent: 0 for agent in self.agents}
+        self.pending_trades = {}
+        self.territory_control = {agent: set() for agent in self.agents}
         self.observation_spaces = {agent : spaces.Dict({
             "map": spaces.Box(
                 low=0, 
@@ -186,17 +194,30 @@ class Civilization(AECEnv):
             )
         }) for agent in self.agents}
         self.action_spaces = {agent : spaces.Dict({
-            "action_type": spaces.Discrete(7),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER
+            "action_type": spaces.Discrete(12),  # Added INVADE_TERRITORY
             "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
             "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
             "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
-            "project_id": spaces.Discrete(self.max_projects)       # For ASSIGN_PROJECT
+            "project_id": spaces.Discrete(self.max_projects),       # For ASSIGN_PROJECT
+            "harvest_amount": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),  # New parameter for harvest percentage
+            "trade_target": spaces.Discrete(num_agents),  # Which agent to trade with
+            "offer_money": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.float32),
+            "request_money": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.float32),
+            "offer_unit_id": spaces.Discrete(max_units_per_agent + 1),  # +1 for "no unit"
+            "request_unit_id": spaces.Discrete(max_units_per_agent + 1),  # +1 for "no unit"
+            "invade_x": spaces.Discrete(map_size[1]),  # X coordinate to invade
+            "invade_y": spaces.Discrete(map_size[0])   # Y coordinate to invade
         }) for agent in self.agents}
+        
+        self.disaster_frequency = disaster_frequency  # Probability of disaster per step
+        self.disaster_radius = disaster_radius  # Radius of effect for disasters
+        self.disaster_locations = []  # Track recent disaster locations for rendering
+        self.disaster_fade_time = 10  # How many steps disaster effects remain visible
+
 
         self.aggression_factor = 1.0
         self.replenish_rate = 0.25
         self.disaster_frequency = 0.1   
-    
     
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -371,6 +392,21 @@ class Civilization(AECEnv):
             city_id = action['city_id']
             self._handle_buy_settler(agent, city_id)
         
+        elif action_type == self.HARVEST_RESOURCES:
+            self._handle_harvest_resources(agent, action)
+
+        elif action_type == self.PROPOSE_TRADE:
+            self._handle_propose_trade(agent, action)
+        
+        elif action_type == self.ACCEPT_TRADE:
+            self._handle_accept_trade(agent)
+        
+        elif action_type == self.REJECT_TRADE:
+            self._handle_reject_trade(agent)
+
+        elif action_type == self.INVADE_TERRITORY:
+            self._handle_invade_territory(agent, action)
+
         elif action_type == self.NO_OP:
             pass  # Do nothing
 
@@ -402,6 +438,157 @@ class Civilization(AECEnv):
             self.agent_selection = None
             print("Game done!")
         #TODO: DO INFO? 
+
+        # Check for random disaster
+        if np.random.random() < self.disaster_frequency:
+            disaster_x = np.random.randint(0, self.map_width)
+            disaster_y = np.random.randint(0, self.map_height)
+            self._process_disaster(disaster_x, disaster_y)
+        
+        # Update disaster fade times
+        self.disaster_locations = [loc for loc in self.disaster_locations if loc['time'] > 0]
+        for loc in self.disaster_locations:
+            loc['time'] -= 1
+
+    def _handle_invade_territory(self, agent, action):
+        """Handle territory invasion attempt"""
+        invade_x = action['invade_x']
+        invade_y = action['invade_y']
+        
+        # Check if coordinates are valid
+        if not (0 <= invade_x < self.map_width and 0 <= invade_y < self.map_height):
+            return
+            
+        # Find units near the invasion point
+        invasion_radius = 2
+        invading_units = []
+        
+        for unit in self.units[agent]:
+            if unit.type == 'warrior':  # Only warriors can invade
+                dist = abs(unit.x - invade_x) + abs(unit.y - invade_y)
+                if dist <= invasion_radius:
+                    invading_units.append(unit)
+        
+        # Need at least one warrior nearby to invade
+        if not invading_units:
+            return
+            
+        # Check current territory owner
+        current_owner = None
+        for potential_owner in self.agents:
+            if self.map[invade_y, invade_x, self.agents.index(potential_owner)] > 0:
+                current_owner = potential_owner
+                break
+                
+        if current_owner is None or current_owner == agent:
+            return  # Can't invade unclaimed territory or own territory
+            
+        # Calculate invasion success probability based on military strength
+        defender_strength = self._calculate_defense_strength(current_owner, invade_x, invade_y)
+        attacker_strength = len(invading_units) * 100  # Base strength per warrior
+        
+        success_prob = attacker_strength / (attacker_strength + defender_strength)
+        
+        if np.random.random() < success_prob:
+            # Successful invasion
+            self._transfer_territory(invade_x, invade_y, current_owner, agent)
+            self.territory_control[agent].add((invade_x, invade_y))
+            self.territory_control[current_owner].remove((invade_x, invade_y))
+            
+            # Apply damage to defending units
+            self._damage_defending_units(current_owner, invade_x, invade_y)
+            
+            # Update rewards
+            self.rewards[agent] += self.k11  # Reward for successful invasion
+        else:
+            # Failed invasion - damage to attacking units
+            for unit in invading_units:
+                unit.health -= 20
+                if unit.health <= 0:
+                    self.units[agent].remove(unit)
+                    self.units_lost[agent] += 1
+
+    def _calculate_defense_strength(self, defender, x, y):
+        """Calculate defensive strength at a location"""
+        strength = 0
+        defense_radius = 2
+        
+        # Add strength from nearby units
+        for unit in self.units[defender]:
+            if unit.type == 'warrior':
+                dist = abs(unit.x - x) + abs(unit.y - y)
+                if dist <= defense_radius:
+                    strength += 100  # Base strength per warrior
+                    
+        # Add strength from nearby cities
+        for city in self.cities[defender]:
+            dist = abs(city.x - x) + abs(city.y - y)
+            if dist <= defense_radius:
+                strength += 200  # Base strength per city
+                
+        return strength
+
+    def _transfer_territory(self, x, y, old_owner, new_owner):
+        """Transfer territory ownership between agents"""
+        # Update the map ownership channels
+        self.map[y, x, self.agents.index(old_owner)] = 0
+        self.map[y, x, self.agents.index(new_owner)] = 1
+        
+        # Check for isolated territories and update visibility
+        self._update_visibility(new_owner, x, y)
+        self._check_isolated_territories(old_owner)
+
+    def _check_isolated_territories(self, agent):
+        """Check for and handle isolated territories after invasion"""
+        visited = set()
+        connected = set()
+        
+        # Find a starting point (any owned city or unit)
+        start = None
+        for city in self.cities[agent]:
+            start = (city.x, city.y)
+            break
+        if start is None and self.units[agent]:
+            unit = self.units[agent][0]
+            start = (unit.x, unit.y)
+            
+        if start is None:
+            return  # No cities or units left
+            
+        # DFS to find all connected territories
+        def dfs(pos):
+            visited.add(pos)
+            x, y = pos
+            if self.map[y, x, self.agents.index(agent)] > 0:
+                connected.add(pos)
+                for dx, dy in [(0,1), (1,0), (0,-1), (-1,0)]:
+                    new_x, new_y = x + dx, y + dy
+                    if (0 <= new_x < self.map_width and 
+                        0 <= new_y < self.map_height and 
+                        (new_x, new_y) not in visited):
+                        dfs((new_x, new_y))
+        
+        dfs(start)
+        
+        # Remove ownership of isolated territories
+        for x in range(self.map_width):
+            for y in range(self.map_height):
+                if (self.map[y, x, self.agents.index(agent)] > 0 and 
+                    (x, y) not in connected):
+                    self.map[y, x, self.agents.index(agent)] = 0
+                    if (x, y) in self.territory_control[agent]:
+                        self.territory_control[agent].remove((x, y))
+
+    def _damage_defending_units(self, defender, x, y):
+        """Apply damage to defending units in invaded territory"""
+        damage_radius = 1
+        for unit in self.units[defender]:
+            dist = abs(unit.x - x) + abs(unit.y - y)
+            if dist <= damage_radius:
+                unit.health -= 35
+                if unit.health <= 0:
+                    self.units[defender].remove(unit)
+                    self.units_lost[defender] += 1
 
     def update_state_visit_count(self, agent, current_visibility_map):
         """
@@ -558,6 +745,105 @@ class Civilization(AECEnv):
             else:
                 # Handle insufficient funds
                 pass
+
+    def _handle_harvest_resources(self, agent, action):
+        """Handle resource harvesting action"""
+        unit_id = action['unit_id']
+        harvest_percent = float(action['harvest_amount'])
+        
+        if unit_id < 0 or unit_id >= len(self.units[agent]):
+            return
+            
+        unit = self.units[agent][unit_id]
+        x, y = unit.x, unit.y
+        
+        # Get harvestable resources in 1-block radius [will probably increase radius later]
+        resources_gained = 0
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                new_x, new_y = x + dx, y + dy
+                if 0 <= new_x < self.map_width and 0 <= new_y < self.map_height:
+                    resource_channel = self._calculate_num_channels() - 4  # Resources
+                    material_channel = self._calculate_num_channels() - 3  # Materials
+                    water_channel = self._calculate_num_channels() - 2     # Water
+                    
+                    # Calculate harvestable amount
+                    for channel in [resource_channel, material_channel, water_channel]:
+                        current_amount = self.map[new_y, new_x, channel]
+                        harvest_amount = current_amount * harvest_percent
+                        self.map[new_y, new_x, channel] -= harvest_amount
+                        resources_gained += harvest_amount
+        
+        # Update resources and environmental impact
+        self.resources_gained[agent] += resources_gained
+        self.environmental_impact[agent] += resources_gained * 0.5
+        self.money[agent] += resources_gained * 10 # curretly we convert harvest resources to money but can change this to resources being used in themselves for projects, ect.
+
+    def _handle_propose_trade(self, agent, action):
+        """Handle a trade proposal from an agent"""
+        target_agent = action['trade_target']
+        if target_agent == agent or target_agent not in self.agents:
+            return
+            
+        offer = {
+            'offer_money': float(action['offer_money']),
+            'request_money': float(action['request_money']),
+            'offer_unit_id': action['offer_unit_id'],
+            'request_unit_id': action['request_unit_id']
+        }
+        
+        # Validate the offer
+        if offer['offer_money'] > self.money[agent]:
+            return
+        if offer['offer_unit_id'] < self.max_units_per_agent and offer['offer_unit_id'] >= len(self.units[agent]):
+            return
+            
+        # Store the pending trade
+        self.pending_trades[agent] = (target_agent, offer)
+
+    def _handle_accept_trade(self, agent):
+        """Handle acceptance of a pending trade"""
+        # Find trades where this agent is the target
+        for offering_agent, (target_agent, offer) in self.pending_trades.items():
+            if target_agent == agent:
+                # Validate the acceptance
+                if offer['request_money'] > self.money[agent]:
+                    continue
+                if offer['request_unit_id'] < self.max_units_per_agent and offer['request_unit_id'] >= len(self.units[agent]):
+                    continue
+                    
+                # Execute the trade
+                self._execute_trade(offering_agent, agent, offer)
+                # Remove the pending trade
+                del self.pending_trades[offering_agent]
+                break
+
+    def _handle_reject_trade(self, agent):
+        """Handle rejection of a pending trade"""
+        # Remove any trades where this agent is the target
+        self.pending_trades = {k: v for k, v in self.pending_trades.items() 
+                             if v[0] != agent}
+
+    def _execute_trade(self, agent1, agent2, offer):
+        """Execute a trade between two agents"""
+        # Exchange money
+        self.money[agent1] -= offer['offer_money']
+        self.money[agent2] += offer['offer_money']
+        self.money[agent2] -= offer['request_money']
+        self.money[agent1] += offer['request_money']
+        
+        # Exchange units if specified
+        if offer['offer_unit_id'] < self.max_units_per_agent:
+            unit = self.units[agent1][offer['offer_unit_id']]
+            self.units[agent1].remove(unit)
+            unit.owner = agent2
+            self.units[agent2].append(unit)
+            
+        if offer['request_unit_id'] < self.max_units_per_agent:
+            unit = self.units[agent2][offer['request_unit_id']]
+            self.units[agent2].remove(unit)
+            unit.owner = agent1
+            self.units[agent1].append(unit)
 
     class Unit:
         def __init__(self, x, y, unit_type, owner, env):
@@ -1472,6 +1758,19 @@ class Civilization(AECEnv):
             for y_pos, x_pos in settler_positions:
                 self._draw_square(x_pos, y_pos, agent_colors[agent_idx % len(agent_colors)])
 
+        # Draw disaster effects
+        for disaster in self.disaster_locations:
+            alpha = int(255 * (disaster['time'] / self.disaster_fade_time))
+            disaster_surface = pygame.Surface((self.cell_size * (2 * self.disaster_radius + 1), 
+                                            self.cell_size * (2 * self.disaster_radius + 1)), 
+                                            pygame.SRCALPHA)
+            pygame.draw.circle(disaster_surface, (255, 0, 0, alpha),
+                            (disaster_surface.get_width()//2, disaster_surface.get_height()//2),
+                            self.disaster_radius * self.cell_size)
+            self.screen.blit(disaster_surface,
+                            ((disaster['x'] - self.disaster_radius) * self.cell_size,
+                            (disaster['y'] - self.disaster_radius) * self.cell_size))
+
     def _draw_circle(self, x, y, color):
         """
         Draw a circle (resource) at the given map coordinates.
@@ -1570,6 +1869,8 @@ class Civilization(AECEnv):
         self.cities_captured = {agent: 0 for agent in self.agents}
         self.resources_gained = {agent: 0 for agent in self.agents}
         self.money = {agent: 0 for agent in self.agents}  # Reset money for each agent
+        self.pending_trades = {}
+        self.territory_control = {agent: set() for agent in self.agents}
 
         observations = {agent: self.observe(agent) for agent in self.agents}
 
@@ -1580,6 +1881,46 @@ class Civilization(AECEnv):
 
         return observations
 
+    def _process_disaster(self, center_x, center_y):
+        """Process a disaster at the given center location affecting surrounding radius"""
+        for dx in range(-self.disaster_radius, self.disaster_radius + 1):
+            for dy in range(-self.disaster_radius, self.disaster_radius + 1):
+                x, y = center_x + dx, center_y + dy
+                if 0 <= x < self.map_width and 0 <= y < self.map_height:
+                    # Calculate distance from center
+                    distance = math.sqrt(dx**2 + dy**2)
+                    if distance <= self.disaster_radius:
+                        self._destroy_tile_contents(x, y)
+        
+        # Add to disaster locations for rendering
+        self.disaster_locations.append({
+            'x': center_x,
+            'y': center_y,
+            'time': self.disaster_fade_time
+        })
+
+    def _destroy_tile_contents(self, x, y):
+        """Destroy everything on a given tile"""
+        # Clear resources
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
+        for i in range(3):  # Clear all resource types
+            self.map[y, x, resource_channels_start + i] = 0
+
+        # Destroy cities and units at this location
+        for agent in self.agents:
+            # Check and destroy cities
+            cities_to_remove = [city for city in self.cities[agent] if city.x == x and city.y == y]
+            for city in cities_to_remove:
+                self.cities[agent].remove(city)
+                city_channel = self.num_of_agents + (3 * self.agents.index(agent))
+                self.map[y, x, city_channel] = 0
+
+            # Check and destroy units
+            units_to_remove = [unit for unit in self.units[agent] if unit.x == x and unit.y == y]
+            for unit in units_to_remove:
+                self.units[agent].remove(unit)
+                unit_channel = self.num_of_agents + (3 * self.agents.index(agent)) + (1 if unit.type == 'warrior' else 2)
+                self.map[y, x, unit_channel] = 0
 
 # Testing 
 # if __name__ == "__main__":
@@ -1620,4 +1961,4 @@ if __name__ == "__main__":
         # time.sleep(0.2)  # Slow it down so you can see
 
     pygame.quit()
-  
+
