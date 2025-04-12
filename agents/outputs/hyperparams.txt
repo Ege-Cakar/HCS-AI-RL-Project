@@ -1,4 +1,0 @@
-Hyperparameters:
- Ran for 100 iterations 
- Each iteration runs 5 trajectories 
- Each trajectory contains 500 time steps
