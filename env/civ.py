@@ -97,12 +97,21 @@ class Civilization(AECEnv):
 
         # Initialize Pygame:
         pygame.init()
-        self.cell_size = 20  # Size of each tile in pixels
+
+        info = pygame.display.Info()
+        max_width, max_height = info.current_w, info.current_h
+
+        cell_width = max_width // self.map_width
+        cell_height = max_height // self.map_height
+        self.cell_size = min(cell_width, cell_height)
+
         self.window_width = self.map_width * self.cell_size
         self.window_height = self.map_height * self.cell_size
+
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
         pygame.display.set_caption('Civilization Environment')
         self.clock = pygame.time.Clock()
+        
         #This can definitebly be improved, but for now it's just a placeholder.
         # Initialize money tracker
         self.money = {agent: 0 for agent in self.agents}
