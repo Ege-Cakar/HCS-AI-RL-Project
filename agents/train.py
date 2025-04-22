@@ -1,6 +1,19 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import sys
+import os
+
+# Add agents directory to path to allow imports
+agents_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(agents_dir, '..'))
+env_dir = os.path.join(parent_dir, 'env')
+outputs_dir = os.path.join(parent_dir, 'outputs')
+sys.path.append(env_dir)
+sys.path.append(agents_dir)
+
+# Create outputs directory if it doesn't exist
+os.makedirs(outputs_dir, exist_ok=True)
+
 import pettingzoo as pz
 import gymnasium as gym
 from gymnasium import spaces
@@ -168,7 +181,7 @@ class ProximalPolicyOptimization:
                 ax.legend()
         plt.tight_layout
         if self.step_max >=10:
-            plt.savefig("/content/drive/My Drive/cumulative_reward_component.png")  # Save as PNG
+            plt.savefig(os.path.join(outputs_dir, "cumulative_reward_component.png"))  # Save as PNG
         plt.show()
 
         plt.figure(figsize=(10, 6))
@@ -180,18 +193,18 @@ class ProximalPolicyOptimization:
         plt.legend()
         plt.grid()
         if self.step_max >=10:
-            plt.savefig("/content/drive/My Drive/cumulative_reward.png")  # Save as PNG
+            plt.savefig(os.path.join(outputs_dir, "cumulative_reward.png"))  # Save as PNG
         plt.show()
 
         # Data to save
         if self.step_max >=10:
             data = f"Hyperparameters:\n Ran for {self.step_max} iterations \n Each iteration runs {self.batch_size} trajectories \n Each trajectory contains {self.T} time steps"
 
-            torch.save({agent: self.actor_policies[agent].state_dict() for agent in self.env.agents}, "/content/drive/My Drive/saved_actor_policies.pth")
-            torch.save(self.critic_policies.state_dict(), "/content/drive/My Drive/saved_critic_policy.pth")
+            torch.save({agent: self.actor_policies[agent].state_dict() for agent in self.env.agents}, os.path.join(outputs_dir, "saved_actor_policies.pth"))
+            torch.save(self.critic_policies.state_dict(), os.path.join(outputs_dir, "saved_critic_policy.pth"))
             
             # Save to a text file
-            with open("/content/drive/My Drive/hyperparams.txt", "w") as file:
+            with open(os.path.join(outputs_dir, "hyperparams.txt"), "w") as file:
                 file.write(data)
             return None
     
@@ -610,7 +623,7 @@ class ProximalPolicyOptimization:
                 ax.legend()
             plt.tight_layout()
             if self.step_max >=10:
-                plt.savefig("/content/drive/My Drive/actions_eval.png")
+                plt.savefig(os.path.join(outputs_dir, "actions_eval.png"))
             plt.show()
             print("Evaluation complete.")
 
@@ -827,4 +840,4 @@ class ProximalPolicyOptimization:
                 returns[agent, t] = discounted_sum
 
         return returns
-    
+

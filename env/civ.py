@@ -8,6 +8,7 @@ import pygame
 from pygame.locals import QUIT
 import math
 from noise import pnoise2
+import time
 
 # TODO: Make sure invalid actions are handled gracefully
 # Example action: 
@@ -22,7 +23,7 @@ from noise import pnoise2
 
 class Civilization(AECEnv): 
     metadata = {'render_modes': ['human'], 'name': 'Civilization_v0'}
-    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', *args, **kwargs):
+    def __init__(self, map_size, num_agents, max_cities=10, max_projects = 5, max_units_per_agent = 50, visibility_range=1, render_mode='human', disaster_frequency=0.01, disaster_radius=2, *args, **kwargs):
         """
         Initialize the Civilization game.
         Args:
@@ -45,6 +46,7 @@ class Civilization(AECEnv):
             raise ValueError(
                 f"Number of players ({num_agents}) exceeds the maximum allowed (6)."
             )
+        self._cumulative_rewards = {agent: 0.0 for agent in self.agents}
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.reset()
         self.num_of_agents = num_agents
@@ -75,7 +77,12 @@ class Civilization(AECEnv):
         self.NO_OP = 4
         self.BUY_WARRIOR = 5
         self.BUY_SETTLER = 6
-        self.CHANGE_GOVERNMENT = 7  # New action type for changing government
+        self.HARVEST_RESOURCES = 7
+        self.PROPOSE_TRADE = 8
+        self.ACCEPT_TRADE = 9
+        self.REJECT_TRADE = 10
+        self.INVADE_TERRITORY = 11
+        self.CHANGE_GOVERNMENT = 12  # New action type for changing government
         
         # Government types
         self.DEMOCRACY = 0
@@ -147,12 +154,21 @@ class Civilization(AECEnv):
 
         # Initialize Pygame:
         pygame.init()
-        self.cell_size = 20  # Size of each tile in pixels
+
+        info = pygame.display.Info()
+        max_width, max_height = info.current_w, info.current_h
+
+        cell_width = max_width // self.map_width
+        cell_height = max_height // self.map_height
+        self.cell_size = min(cell_width, cell_height)
+
         self.window_width = self.map_width * self.cell_size
         self.window_height = self.map_height * self.cell_size
+
         self.screen = pygame.display.set_mode((self.window_width, self.window_height))
         pygame.display.set_caption('Civilization Environment')
         self.clock = pygame.time.Clock()
+        
         #This can definitebly be improved, but for now it's just a placeholder.
         # Initialize money tracker
         self.money = {agent: 0 for agent in self.agents}
@@ -177,6 +193,7 @@ class Civilization(AECEnv):
         self.k8 = 50.0 # Change in GDP
         self.k9 = 50.0  # Change in Energy output
         self.k10 = 35.0 # Resources gained
+        self.k11 = 75.0  # Reward for successful territory invasion
         self.gamma = 0.00001  # Environmental impact penalty
         self.beta = 0.5
 
@@ -211,6 +228,8 @@ class Civilization(AECEnv):
         self.cities_lost = {agent: 0 for agent in self.agents}
         self.cities_captured = {agent: 0 for agent in self.agents}
         self.resources_gained = {agent: 0 for agent in self.agents}
+        self.pending_trades = {}
+        self.territory_control = {agent: set() for agent in self.agents}
         self.observation_spaces = {agent : spaces.Dict({
             "map": spaces.Box(
                 low=0, 
@@ -247,13 +266,31 @@ class Civilization(AECEnv):
             "can_change_government": spaces.Discrete(2)  # 0: cannot change, 1: can change
         }) for agent in self.agents}
         self.action_spaces = {agent : spaces.Dict({
-            "action_type": spaces.Discrete(8),  # 0: MOVE_UNIT, 1: ATTACK_UNIT, 2: FOUND_CITY, 3: ASSIGN_PROJECT, 4: NO_OP, 5: BUY_WARRIOR, 6: BUY_SETTLER, 7: CHANGE_GOVERNMENT    
-            "unit_id": spaces.Discrete(self.max_units_per_agent),  # Only if moving a unit
-            "direction": spaces.Discrete(4),  # Direction to move
-            "city_id": spaces.Discrete(self.max_cities),  # Only if founding a city
-            "project_id": spaces.Discrete(self.max_projects),  # Only if assigning a project
+            "action_type": spaces.Discrete(13),  # Added INVADE_TERRITORY
+            "unit_id": spaces.Discrete(self.max_units_per_agent),  # For MOVE_UNIT, ATTACK_UNIT, FOUND_CITY
+            "direction": spaces.Discrete(4),    # For MOVE_UNIT, ATTACK_UNIT
+            "city_id": spaces.Discrete(self.max_cities),           # For ASSIGN_PROJECT
+            "project_id": spaces.Discrete(self.max_projects),       # For ASSIGN_PROJECT
+            "harvest_amount": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),  # New parameter for harvest percentage
+            "trade_target": spaces.Discrete(num_agents),  # Which agent to trade with
+            "offer_money": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.float32),
+            "request_money": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.float32),
+            "offer_unit_id": spaces.Discrete(max_units_per_agent + 1),  # +1 for "no unit"
+            "request_unit_id": spaces.Discrete(max_units_per_agent + 1),  # +1 for "no unit"
+            "invade_x": spaces.Discrete(map_size[1]),  # X coordinate to invade
+            "invade_y": spaces.Discrete(map_size[0])   # Y coordinate to invade
             "target_government": spaces.Discrete(4)  # Only if changing government
         }) for agent in self.agents}
+        
+        self.disaster_frequency = disaster_frequency  # Probability of disaster per step
+        self.disaster_radius = disaster_radius  # Radius of effect for disasters
+        self.disaster_locations = []  # Track recent disaster locations for rendering
+        self.disaster_fade_time = 10  # How many steps disaster effects remain visible
+
+
+        self.aggression_factor = 1.0
+        self.replenish_rate = 0.25
+        self.disaster_frequency = 0.1   
     
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -417,6 +454,11 @@ class Civilization(AECEnv):
         self._process_city_projects(agent)
         action_type = action['action_type']
         
+        print(f"Agent {agent} taking action: {action_type}")  # Debug print
+        
+        if action_type == self.FOUND_CITY:
+            print(f"Attempting to found city with action: {action}")  # Debug print
+        
         if action_type == self.MOVE_UNIT:
             self._handle_move_unit(agent, action)
         
@@ -444,6 +486,23 @@ class Civilization(AECEnv):
             target_government = action['target_government']
             self._handle_change_government(agent, target_government)
         
+        elif action_type == self.HARVEST_RESOURCES:
+            self._handle_harvest_resources(agent, action)
+
+        elif action_type == self.PROPOSE_TRADE:
+            self._handle_propose_trade(agent, action)
+        
+        elif action_type == self.ACCEPT_TRADE:
+            self._handle_accept_trade(agent)
+        
+        elif action_type == self.REJECT_TRADE:
+            self._handle_reject_trade(agent)
+
+        elif action_type == self.INVADE_TERRITORY:
+            self._handle_invade_territory(agent, action)
+
+        elif action_type == self.NO_OP:
+            pass  # Do nothing
         else:
             pass
         
@@ -495,6 +554,157 @@ class Civilization(AECEnv):
             self.agent_selection = None
             print("Game done!")
         #TODO: DO INFO? 
+
+        # Check for random disaster
+        if np.random.random() < self.disaster_frequency:
+            disaster_x = np.random.randint(0, self.map_width)
+            disaster_y = np.random.randint(0, self.map_height)
+            self._process_disaster(disaster_x, disaster_y)
+        
+        # Update disaster fade times
+        self.disaster_locations = [loc for loc in self.disaster_locations if loc['time'] > 0]
+        for loc in self.disaster_locations:
+            loc['time'] -= 1
+
+    def _handle_invade_territory(self, agent, action):
+        """Handle territory invasion attempt"""
+        invade_x = action['invade_x']
+        invade_y = action['invade_y']
+        
+        # Check if coordinates are valid
+        if not (0 <= invade_x < self.map_width and 0 <= invade_y < self.map_height):
+            return
+            
+        # Find units near the invasion point
+        invasion_radius = 2
+        invading_units = []
+        
+        for unit in self.units[agent]:
+            if unit.type == 'warrior':  # Only warriors can invade
+                dist = abs(unit.x - invade_x) + abs(unit.y - invade_y)
+                if dist <= invasion_radius:
+                    invading_units.append(unit)
+        
+        # Need at least one warrior nearby to invade
+        if not invading_units:
+            return
+            
+        # Check current territory owner
+        current_owner = None
+        for potential_owner in self.agents:
+            if self.map[invade_y, invade_x, self.agents.index(potential_owner)] > 0:
+                current_owner = potential_owner
+                break
+                
+        if (current_owner is None or current_owner == agent):
+            return  # Can't invade unclaimed territory or own territory
+            
+        # Calculate invasion success probability based on military strength
+        defender_strength = self._calculate_defense_strength(current_owner, invade_x, invade_y)
+        attacker_strength = len(invading_units) * 100  # Base strength per warrior
+        
+        success_prob = attacker_strength / (attacker_strength + defender_strength)
+        
+        if np.random.random() < success_prob:
+            # Successful invasion
+            self._transfer_territory(invade_x, invade_y, current_owner, agent)
+            self.territory_control[agent].add((invade_x, invade_y))
+            self.territory_control[current_owner].remove((invade_x, invade_y))
+            
+            # Apply damage to defending units
+            self._damage_defending_units(current_owner, invade_x, invade_y)
+            
+            # Update rewards
+            self.rewards[agent] += self.k11  # Reward for successful invasion
+        else:
+            # Failed invasion - damage to attacking units
+            for unit in invading_units:
+                unit.health -= 20
+                if unit.health <= 0:
+                    self.units[agent].remove(unit)
+                    self.units_lost[agent] += 1
+
+    def _calculate_defense_strength(self, defender, x, y):
+        """Calculate defensive strength at a location"""
+        strength = 0
+        defense_radius = 2
+        
+        # Add strength from nearby units
+        for unit in self.units[defender]:
+            if unit.type == 'warrior':
+                dist = abs(unit.x - x) + abs(unit.y - y)
+                if dist <= defense_radius:
+                    strength += 100  # Base strength per warrior
+                    
+        # Add strength from nearby cities
+        for city in self.cities[defender]:
+            dist = abs(city.x - x) + abs(city.y - y)
+            if dist <= defense_radius:
+                strength += 200  # Base strength per city
+                
+        return strength
+
+    def _transfer_territory(self, x, y, old_owner, new_owner):
+        """Transfer territory ownership between agents"""
+        # Update the map ownership channels
+        self.map[y, x, self.agents.index(old_owner)] = 0
+        self.map[y, x, self.agents.index(new_owner)] = 1
+        
+        # Check for isolated territories and update visibility
+        self._update_visibility(new_owner, x, y)
+        self._check_isolated_territories(old_owner)
+
+    def _check_isolated_territories(self, agent):
+        """Check for and handle isolated territories after invasion"""
+        visited = set()
+        connected = set()
+        
+        # Find a starting point (any owned city or unit)
+        start = None
+        for city in self.cities[agent]:
+            start = (city.x, city.y)
+            break
+        if start is None and self.units[agent]:
+            unit = self.units[agent][0]
+            start = (unit.x, unit.y)
+            
+        if start is None:
+            return  # No cities or units left
+            
+        # DFS to find all connected territories
+        def dfs(pos):
+            visited.add(pos)
+            x, y = pos
+            if self.map[y, x, self.agents.index(agent)] > 0:
+                connected.add(pos)
+                for dx, dy in [(0,1), (1,0), (0,-1), (-1,0)]:
+                    new_x, new_y = x + dx, y + dy
+                    if (0 <= new_x < self.map_width and 
+                        0 <= new_y < self.map_height and 
+                        (new_x, new_y) not in visited):
+                        dfs((new_x, new_y))
+        
+        dfs(start)
+        
+        # Remove ownership of isolated territories
+        for x in range(self.map_width):
+            for y in range(self.map_height):
+                if (self.map[y, x, self.agents.index(agent)] > 0 and 
+                    (x, y) not in connected):
+                    self.map[y, x, self.agents.index(agent)] = 0
+                    if (x, y) in self.territory_control[agent]:
+                        self.territory_control[agent].remove((x, y))
+
+    def _damage_defending_units(self, defender, x, y):
+        """Apply damage to defending units in invaded territory"""
+        damage_radius = 1
+        for unit in self.units[defender]:
+            dist = abs(unit.x - x) + abs(unit.y - y)
+            if dist <= damage_radius:
+                unit.health -= 35
+                if unit.health <= 0:
+                    self.units[defender].remove(unit)
+                    self.units_lost[defender] += 1
 
     def update_state_visit_count(self, agent, current_visibility_map):
         """
@@ -568,6 +778,16 @@ class Civilization(AECEnv):
             unit = self.units[agent][unit_id]
             unit.move(direction)
             self._update_visibility(agent, unit.x, unit.y)
+            # Clear previous motion markers
+            self.map[:, :, self.MOTION_CHANNEL] *= 0.9
+
+            unit = self.units[agent][unit_id]
+            unit.move(direction)
+            self._update_visibility(agent, unit.x, unit.y)
+
+            # Mark motion at the new tile
+            self.map[unit.y, unit.x, self.MOTION_CHANNEL] = 1.0
+
         
     def _handle_attack_unit(self, agent, action):
         unit_id = action['unit_id']
@@ -580,23 +800,19 @@ class Civilization(AECEnv):
     
 
     def _handle_found_city(self, agent, action):
+        """Handle founding a new city"""
         unit_id = action['unit_id']
         if unit_id < 0 or unit_id >= len(self.units[agent]):
-            # Handle invalid unit ID
-            pass
-        else: 
-            unit = self.units[agent][unit_id]
-            if unit.type == 'settler':
-                if unit.found_city():
-                    new_city = self.City(unit.x, unit.y, agent, env=self)
-                    self.cities[agent].append(new_city)
-                    # Remove the settler from the game
-                    self.units[agent].remove(unit)
-                    # Update the map, visibility, and any other game state
-                    self._update_map_with_new_city(agent, new_city)
-                    #print(f"Agent {agent} founded a city at ({unit.x}, {unit.y})!")
-                else:
-                    pass
+            return
+
+        unit = self.units[agent][unit_id]
+        if unit.type == 'settler':
+            if unit.found_city():
+                new_city = self.City(unit.x, unit.y, agent, env=self)
+                self.cities[agent].append(new_city)
+                self.units[agent].remove(unit)
+                self._update_map_with_new_city(agent, new_city)
+                print(f"City founded at ({unit.x}, {unit.y}) by agent {agent}")  # Debug print
 
     def _handle_assign_project(self, agent, action):
         city_id = action['city_id']
@@ -651,6 +867,105 @@ class Civilization(AECEnv):
             else:
                 # Handle insufficient funds
                 pass
+
+    def _handle_harvest_resources(self, agent, action):
+        """Handle resource harvesting action"""
+        unit_id = action['unit_id']
+        harvest_percent = float(action['harvest_amount'])
+        
+        if unit_id < 0 or unit_id >= len(self.units[agent]):
+            return
+            
+        unit = self.units[agent][unit_id]
+        x, y = unit.x, unit.y
+        
+        # Get harvestable resources in 1-block radius [will probably increase radius later]
+        resources_gained = 0
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                new_x, new_y = x + dx, y + dy
+                if 0 <= new_x < self.map_width and 0 <= new_y < self.map_height:
+                    resource_channel = self._calculate_num_channels() - 4  # Resources
+                    material_channel = self._calculate_num_channels() - 3  # Materials
+                    water_channel = self._calculate_num_channels() - 2     # Water
+                    
+                    # Calculate harvestable amount
+                    for channel in [resource_channel, material_channel, water_channel]:
+                        current_amount = self.map[new_y, new_x, channel]
+                        harvest_amount = current_amount * harvest_percent
+                        self.map[new_y, new_x, channel] -= harvest_amount
+                        resources_gained += harvest_amount
+        
+        # Update resources and environmental impact
+        self.resources_gained[agent] += resources_gained
+        self.environmental_impact[agent] += resources_gained * 0.5
+        self.money[agent] += resources_gained * 10 # curretly we convert harvest resources to money but can change this to resources being used in themselves for projects, ect.
+
+    def _handle_propose_trade(self, agent, action):
+        """Handle a trade proposal from an agent"""
+        target_agent = action['trade_target']
+        if target_agent == agent or target_agent not in self.agents:
+            return
+            
+        offer = {
+            'offer_money': float(action['offer_money']),
+            'request_money': float(action['request_money']),
+            'offer_unit_id': action['offer_unit_id'],
+            'request_unit_id': action['request_unit_id']
+        }
+        
+        # Validate the offer
+        if offer['offer_money'] > self.money[agent]:
+            return
+        if offer['offer_unit_id'] < self.max_units_per_agent and offer['offer_unit_id'] >= len(self.units[agent]):
+            return
+            
+        # Store the pending trade
+        self.pending_trades[agent] = (target_agent, offer)
+
+    def _handle_accept_trade(self, agent):
+        """Handle acceptance of a pending trade"""
+        # Find trades where this agent is the target
+        for offering_agent, (target_agent, offer) in self.pending_trades.items():
+            if target_agent == agent:
+                # Validate the acceptance
+                if offer['request_money'] > self.money[agent]:
+                    continue
+                if offer['request_unit_id'] < self.max_units_per_agent and offer['request_unit_id'] >= len(self.units[agent]):
+                    continue
+                    
+                # Execute the trade
+                self._execute_trade(offering_agent, agent, offer)
+                # Remove the pending trade
+                del self.pending_trades[offering_agent]
+                break
+
+    def _handle_reject_trade(self, agent):
+        """Handle rejection of a pending trade"""
+        # Remove any trades where this agent is the target
+        self.pending_trades = {k: v for k, v in self.pending_trades.items() 
+                             if v[0] != agent}
+
+    def _execute_trade(self, agent1, agent2, offer):
+        """Execute a trade between two agents"""
+        # Exchange money
+        self.money[agent1] -= offer['offer_money']
+        self.money[agent2] += offer['offer_money']
+        self.money[agent2] -= offer['request_money']
+        self.money[agent1] += offer['request_money']
+        
+        # Exchange units if specified
+        if offer['offer_unit_id'] < self.max_units_per_agent:
+            unit = self.units[agent1][offer['offer_unit_id']]
+            self.units[agent1].remove(unit)
+            unit.owner = agent2
+            self.units[agent2].append(unit)
+            
+        if offer['request_unit_id'] < self.max_units_per_agent:
+            unit = self.units[agent2][offer['request_unit_id']]
+            self.units[agent2].remove(unit)
+            unit.owner = agent1
+            self.units[agent1].append(unit)
 
     class Unit:
         def __init__(self, x, y, unit_type, owner, env):
@@ -773,11 +1088,11 @@ class Civilization(AECEnv):
             # Check all unit channels for all agents
             for agent_idx in range(self.env.num_of_agents):
                 unit_base_idx = self.env.num_of_agents + (3 * agent_idx)
-                # Channels for 'city', 'warrior', 'settler'
-                unit_channels = [unit_base_idx + i for i in range(3)]
-                if np.any(self.env.map[y, x, unit_channels] > 0):
-                    return False  # Tile has a unit or city
-            return True 
+				# Channels for 'city', 'warrior', 'settler'
+				unit_channels = [unit_base_idx + i for i in range(3)]
+				if np.any(self.env.map[y, x, unit_channels] > 0]:
+					return False
+				return True
         
         def _check_enemy_units_and_cities(self, x, y, direction, agent, env): 
             """
@@ -945,15 +1260,35 @@ class Civilization(AECEnv):
                             resources['water'] += 1
             return resources
     
+    # def _calculate_num_channels(self):
+    #     """
+    #     Calculate the number of channels needed for the map representation, which changes dynamically based on number of players.
+    #     """
+    #     ownership_channels = self.num_of_agents  # One channel per agent for ownership
+    #     units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
+    #     resources_channels = 3  # Resources, Materials, Water
+    #     terrain_channel = 1  # Terrain or seawater
+        
+    #     return ownership_channels + units_channels + resources_channels + terrain_channel
+    
     def _calculate_num_channels(self):
-        """
-        Calculate the number of channels needed for the map representation, which changes dynamically based on number of players.
-        """
-        ownership_channels = self.num_of_agents  # One channel per agent for ownership
-        units_channels = 3 * self.num_of_agents  # Cities, Warriors, Settlers per player
-        resources_channels = 3  # Resources, Materials, Water
-        terrain_channel = 1  # Terrain or seawater
-        return ownership_channels + units_channels + resources_channels + terrain_channel
+        ownership_channels = self.num_of_agents
+        units_channels = 3 * self.num_of_agents
+        resources_channels = 3
+        terrain_channel = 1
+        motion_channel = 1
+        land_use_channel = 1
+
+        self.OWNERSHIP_CHANNEL_START = 0
+        self.UNITS_CHANNEL_START = self.OWNERSHIP_CHANNEL_START + ownership_channels
+        self.RESOURCES_CHANNEL_START = self.UNITS_CHANNEL_START + units_channels
+        self.TERRAIN_CHANNEL = self.RESOURCES_CHANNEL_START + resources_channels
+        self.MOTION_CHANNEL = self.TERRAIN_CHANNEL + 1
+        self.LAND_USE_CHANNEL = self.MOTION_CHANNEL + 1
+
+        total = ownership_channels + units_channels + resources_channels + terrain_channel + motion_channel + land_use_channel
+        return total
+
 
     def _calculate_city_attributes(self):
         """
@@ -1653,6 +1988,61 @@ class Civilization(AECEnv):
                 if resource_found:
                     break
 
+    def _draw_ui_overlay(self):
+        font = pygame.font.SysFont(None, 24)
+        bg_color = (0, 0, 50)  # Dark blue background for better readability
+        text_color = (255, 255, 255)  # White text
+
+        # Create a semi-transparent background for the legend
+        legend_surface = pygame.Surface((300, 280), pygame.SRCALPHA)
+        legend_surface.fill((0, 0, 50, 200))  # Dark blue with alpha
+        self.screen.blit(legend_surface, (5, 5))
+
+        # Game stats
+        label_agg = font.render(f"Combat Aggression: {self.aggression_factor:.2f}", True, text_color)
+        self.screen.blit(label_agg, (10, 10))
+
+        label_replenish = font.render(f"Resource Replenish: {self.replenish_rate:.2f}", True, text_color)
+        self.screen.blit(label_replenish, (10, 40))
+
+        label_disaster = font.render(f"Natural Disaster Rate: {self.disaster_frequency:.2f}", True, text_color)
+        self.screen.blit(label_disaster, (10, 70))
+
+        # Legend for game elements
+        legend_y_start = 100
+        legend_spacing = 30
+
+        legend_items = [
+            ("⚡ Energy Source (Lightning)", (255, 255, 0)),      # Yellow lightning for energy
+            ("💎 Raw Materials (Diamond)", (139, 69, 19)),       # Brown diamond for materials
+            ("💧 Water Source (Droplet)", (0, 191, 255)),        # Blue droplet for water
+            ("◼ Settler Unit (Square)", (0, 255, 0)),           # Green square for settlers
+            ("▲ Combat Unit (Triangle)", (255, 0, 0)),          # Red triangle for warriors
+            ("★ City Center (Star)", (255, 255, 0))             # Yellow star for cities
+        ]
+
+        for i, (text, color) in enumerate(legend_items):
+            label = font.render(text, True, text_color)
+            self.screen.blit(label, (10, legend_y_start + i * legend_spacing))
+
+            # Draw the corresponding shape next to the label
+            shape_x = 200
+            shape_y = legend_y_start + i * legend_spacing + 10
+
+            if "Lightning" in text:
+                self._draw_lightning(shape_x // self.cell_size, shape_y // self.cell_size, color)
+            elif "Diamond" in text:
+                self._draw_diamond(shape_x // self.cell_size, shape_y // self.cell_size, color)
+            elif "Droplet" in text:
+                self._draw_droplet(shape_x // self.cell_size, shape_y // self.cell_size, color)
+            elif "Square" in text:
+                self._draw_square(shape_x // self.cell_size, shape_y // self.cell_size, color)
+            elif "Triangle" in text:
+                self._draw_triangle(shape_x // self.cell_size, shape_y // self.cell_size, color)
+            elif "Star" in text:
+                self._draw_star(shape_x // self.cell_size, shape_y // self.cell_size, color)
+
+
     def render(self):
         if self.render_mode == 'human':
             for event in pygame.event.get():
@@ -1660,18 +2050,17 @@ class Civilization(AECEnv):
                     pygame.quit()
                     return
 
-            # Background
-            self.screen.fill((0, 0, 0))  # Black background
+            # Black background
+            self.screen.fill((0, 0, 0)) 
 
-            # Draw the grid and elements
             self._draw_grid()
             self._draw_elements()
-
-            # Overlay visibility
+            self._draw_motion_overlay()
             self._draw_visibility()
+            self._draw_ui_overlay() # added
 
             pygame.display.flip()
-            self.clock.tick(120)  # Limit to 60 fps
+            self.clock.tick(120) 
         else:
             pass
 
@@ -1701,6 +2090,16 @@ class Civilization(AECEnv):
             #print(f"Agent {agent_idx} can see {len(visible_tiles)} tiles.") # Debugging
             #print(visible_tiles) # Debugging
 
+    def _draw_motion_overlay(self):
+        for y in range(self.map_height):
+            for x in range(self.map_width):
+                motion = self.map[y, x, self.MOTION_CHANNEL]
+                if (motion > 0.01):
+                    overlay = pygame.Surface((self.cell_size, self.cell_size), pygame.SRCALPHA)
+                    alpha = int(255 * min(1.0, motion))
+                    overlay.fill((255, 165, 0, alpha))  # Orange with transparency
+                    self.screen.blit(overlay, (x * self.cell_size, y * self.cell_size))
+
 
     def _draw_grid(self):
         """
@@ -1713,10 +2112,11 @@ class Civilization(AECEnv):
                 if self.map[y, x, terrain_channel] == 0:  # Water/ocean tiles
                     rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                     pygame.draw.rect(self.screen, (0, 0, 100), rect)  # Dark blue for water
+                    # pygame.draw.rect(self.screen, (255, 128, 0), rect)  # Orange overlay for movement
                 else:  # Land tiles
                     rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                     pygame.draw.rect(self.screen, (100, 100, 100), rect)  # Light gray for land
-        
+
         # Draw grid lines
         for x in range(0, self.window_width, self.cell_size):
             pygame.draw.line(self.screen, (50, 50, 50), (x, 0), (x, self.window_height))
@@ -1737,10 +2137,11 @@ class Civilization(AECEnv):
             (0, 255, 255)   # Cyan
         ]
         resource_colors = {
-            'resource': (200, 200, 200),   # Light gray
-            'material': (139, 69, 19),     # Brown
-            'water': (0, 191, 255)         # Deep sky blue
+            'resource': (255, 255, 0),    # Yellow for energy
+            'material': (139, 69, 19),    # Brown for materials
+            'water': (0, 191, 255)        # Sky blue for water
         }
+
         # Draw ownership (background color of tiles)
         for y in range(self.map_height):
             for x in range(self.map_width):
@@ -1750,6 +2151,7 @@ class Civilization(AECEnv):
                         rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
                         pygame.draw.rect(self.screen, color, rect)
                         break  # Only one player can own a tile
+
         # Draw resources
         resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
         resources_channel = resource_channels_start
@@ -1757,13 +2159,13 @@ class Civilization(AECEnv):
         water_channel = resource_channels_start + 2
         for y in range(self.map_height):
             for x in range(self.map_width):
-                # Resources
                 if self.map[y, x, resources_channel] == 1:
-                    self._draw_circle(x, y, resource_colors['resource'])
+                    self._draw_lightning(x, y, resource_colors['resource'])
                 if self.map[y, x, materials_channel] == 1:
-                    self._draw_circle(x, y, resource_colors['material'])
+                    self._draw_diamond(x, y, resource_colors['material'])
                 if self.map[y, x, water_channel] == 1:
-                    self._draw_circle(x, y, resource_colors['water'])
+                    self._draw_droplet(x, y, resource_colors['water'])
+
         # Draw units
         for agent_idx in range(self.num_of_agents):
             unit_base_idx = self.num_of_agents + (3 * agent_idx)
@@ -1787,20 +2189,35 @@ class Civilization(AECEnv):
             for y_pos, x_pos in settler_positions:
                 self._draw_square(x_pos, y_pos, agent_colors[agent_idx % len(agent_colors)])
 
+        # Draw disaster effects
+        for disaster in self.disaster_locations:
+            alpha = int(255 * (disaster['time'] / self.disaster_fade_time))
+            disaster_surface = pygame.Surface((self.cell_size * (2 * self.disaster_radius + 1), 
+                                            self.cell_size * (2 * self.disaster_radius + 1)), 
+                                            pygame.SRCALPHA)
+            pygame.draw.circle(disaster_surface, (255, 0, 0, alpha),
+                            (disaster_surface.get_width()//2, disaster_surface.get_height()//2),
+                            self.disaster_radius * self.cell_size)
+            self.screen.blit(disaster_surface,
+                            ((disaster['x'] - self.disaster_radius) * self.cell_size,
+                            (disaster['y'] - self.disaster_radius) * self.cell_size))
+
     def _draw_circle(self, x, y, color):
         """
         Draw a circle (resource) at the given map coordinates.
         """
         center_x = x * self.cell_size + self.cell_size // 2
         center_y = y * self.cell_size + self.cell_size // 2
-        radius = self.cell_size // 4
+        radius = self.cell_size // 3  # Increased from // 4 to // 3
         pygame.draw.circle(self.screen, color, (center_x, center_y), radius)
+        # Add outline
+        pygame.draw.circle(self.screen, (255, 255, 255), (center_x, center_y), radius, 1)
 
     def _draw_square(self, x, y, color):
         """
-        Draw a square (settler) at the given map coordinates. # Placeholder
+        Draw a square (settler) at the given map coordinates.
         """
-        padding = self.cell_size // 8
+        padding = self.cell_size // 6  # Decreased padding to make square larger
         rect = pygame.Rect(
             x * self.cell_size + padding,
             y * self.cell_size + padding,
@@ -1808,21 +2225,25 @@ class Civilization(AECEnv):
             self.cell_size - 2 * padding
         )
         pygame.draw.rect(self.screen, color, rect)
+        # Add outline
+        pygame.draw.rect(self.screen, (255, 255, 255), rect, 1)
 
     def _draw_triangle(self, x, y, color):
         """
         Draw a triangle (warrior) at the given map coordinates.
         """
         half_size = self.cell_size // 2
-        quarter_size = self.cell_size // 4
+        third_size = self.cell_size // 3  # Changed from quarter_size to make triangle larger
         center_x = x * self.cell_size + half_size
         center_y = y * self.cell_size + half_size
         points = [
-            (center_x, center_y - quarter_size),  # Top point
-            (center_x - quarter_size, center_y + quarter_size),  # Bottom left
-            (center_x + quarter_size, center_y + quarter_size)   # Bottom right
+            (center_x, center_y - third_size),  # Top point
+            (center_x - third_size, center_y + third_size),  # Bottom left
+            (center_x + third_size, center_y + third_size)   # Bottom right
         ]
         pygame.draw.polygon(self.screen, color, points)
+        # Add outline
+        pygame.draw.polygon(self.screen, (255, 255, 255), points, 1)
 
     def _draw_star(self, x, y, color):
         """
@@ -1830,29 +2251,105 @@ class Civilization(AECEnv):
         """
         center_x = x * self.cell_size + self.cell_size // 2
         center_y = y * self.cell_size + self.cell_size // 2
-        radius_outer = self.cell_size // 3
-        radius_inner = self.cell_size // 6
+        radius_outer = self.cell_size // 2  # Increased for better visibility
+        radius_inner = self.cell_size // 4  # Adjusted for better proportions
         num_points = 5
         points = []
+
         for i in range(num_points * 2):
-            angle = i * math.pi / num_points - math.pi / 2  # Rotate to point upwards
-            if i % 2 == 0:
-                r = radius_outer
-            else:
-                r = radius_inner
-            px = center_x + r * math.cos(angle)
-            py = center_y + r * math.sin(angle)
+            angle = i * math.pi / num_points - math.pi / 2
+            radius = radius_outer if i % 2 == 0 else radius_inner
+            px = center_x + radius * math.cos(angle)
+            py = center_y + radius * math.sin(angle)
             points.append((px, py))
+
         pygame.draw.polygon(self.screen, color, points)
+        pygame.draw.polygon(self.screen, (255, 255, 255), points, 2)  # Thicker outline
+
+    def _draw_hexagon(self, x, y, color):
+        """
+        Draw a hexagon (resources) at the given map coordinates.
+        """
+        center_x = x * self.cell_size + self.cell_size // 2
+        center_y = y * self.cell_size + self.cell_size // 2
+        radius = self.cell_size // 2.5  # Increased from // 3
+        points = [
+            (center_x + radius * math.cos(math.radians(angle)),
+             center_y + radius * math.sin(math.radians(angle)))
+            for angle in range(0, 360, 60)
+        ]
+        pygame.draw.polygon(self.screen, color, points)
+        # Add outline
+        pygame.draw.polygon(self.screen, (255, 255, 255), points, 1)
+
+    def _draw_lightning(self, x, y, color):
+        """
+        Draw a lightning bolt symbol (for energy resources)
+        """
+        center_x = x * self.cell_size + self.cell_size // 2
+        center_y = y * self.cell_size + self.cell_size // 2
+        size = self.cell_size // 2
+        points = [
+            (center_x, center_y - size//2),  # Top
+            (center_x - size//4, center_y),   # Left middle
+            (center_x, center_y - size//4),   # Middle top
+            (center_x + size//4, center_y),   # Right middle
+            (center_x, center_y + size//2)    # Bottom
+        ]
+        pygame.draw.polygon(self.screen, color, points)
+        pygame.draw.polygon(self.screen, (255, 255, 255), points, 1)  # White outline
+
+    def _draw_diamond(self, x, y, color):
+        """
+        Draw a diamond shape (for material resources)
+        """
+        center_x = x * self.cell_size + self.cell_size // 2
+        center_y = y * self.cell_size + self.cell_size // 2
+        size = self.cell_size // 2
+        points = [
+            (center_x, center_y - size//2),  # Top
+            (center_x + size//2, center_y),  # Right
+            (center_x, center_y + size//2),  # Bottom
+            (center_x - size//2, center_y)   # Left
+        ]
+        pygame.draw.polygon(self.screen, color, points)
+        pygame.draw.polygon(self.screen, (255, 255, 255), points, 1)  # White outline
+
+    def _draw_droplet(self, x, y, color):
+        center_x = x * self.cell_size + self.cell_size // 2
+        center_y = y * self.cell_size + self.cell_size // 2
+        width = self.cell_size // 3
+        height = self.cell_size // 2
+        
+        # Draw the circular part
+        rect = pygame.Rect(
+            center_x - width//2,
+            center_y - height//4,
+            width,
+            width
+        )
+        pygame.draw.ellipse(self.screen, color, rect)
+        pygame.draw.ellipse(self.screen, (255, 255, 255), rect, 1)
+        
+        # Draw the pointed part, which is a triangle
+        points = [
+            (center_x - width//2, center_y),
+            (center_x + width//2, center_y),
+            (center_x, center_y + height//2)
+        ]
+        pygame.draw.polygon(self.screen, color, points)
+        pygame.draw.polygon(self.screen, (255, 255, 255), points, 1)
         
     def reset(self, seed=None, options=None):
-        """
-        Reset the environment.
-        """
+
+        self.terminations = {agent: False for agent in self.agents}
+        self.truncations = {agent: False for agent in self.agents}
+        self.rewards = {agent: 0.0 for agent in self.agents}
+        self.dones = {agent: False for agent in self.agents}
 
         self.agents = self.possible_agents[:]
-        self.rewards = {agent: 0 for agent in self.agents}
-        self.dones = {agent: False for agent in self.agents}
+        # self.rewards = {agent: 0 for agent in self.agents}
+        # self.dones = {agent: False for agent in self.agents}
         self.infos = {agent: {} for agent in self.agents}
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.reset()
@@ -1870,7 +2367,6 @@ class Civilization(AECEnv):
         self._initialize_map()
 
         # Reset visibility maps
-
         self.visibility_maps = {agent: np.zeros((self.map_height, self.map_width), dtype=bool) for agent in self.agents}
         for agent in self.agents:
             for unit in self.units[agent]:
@@ -1886,6 +2382,9 @@ class Civilization(AECEnv):
         self.cities_lost = {agent: 0 for agent in self.agents}
         self.cities_captured = {agent: 0 for agent in self.agents}
         self.resources_gained = {agent: 0 for agent in self.agents}
+        self.money = {agent: 0 for agent in self.agents}  # Reset money for each agent
+        self.pending_trades = {}
+        self.territory_control = {agent: set() for agent in self.agents}
 
         observations = {agent: self.observe(agent) for agent in self.agents}
 
@@ -1896,16 +2395,104 @@ class Civilization(AECEnv):
 
         return observations
 
+    def _process_disaster(self, center_x, center_y):
+        """Process a disaster at the given center location affecting surrounding radius"""
+        for dx in range(-self.disaster_radius, self.disaster_radius + 1):
+            for dy in range(-self.disaster_radius, self.disaster_radius + 1):
+                x, y = center_x + dx, center_y + dy
+                if 0 <= x < self.map_width and 0 <= y < self.map_height:
+                    # Calculate distance from center
+                    distance = math.sqrt(dx**2 + dy**2)
+                    if distance <= self.disaster_radius:
+                        self._destroy_tile_contents(x, y)
+        
+        # Add to disaster locations for rendering
+        self.disaster_locations.append({
+            'x': center_x,
+            'y': center_y,
+            'time': self.disaster_fade_time
+        })
+
+    def _destroy_tile_contents(self, x, y):
+        """Destroy everything on a given tile"""
+        # Clear resources
+        resource_channels_start = self.num_of_agents + 3 * self.num_of_agents
+        for i in range(3):  # Clear all resource types
+            self.map[y, x, resource_channels_start + i] = 0
+
+        # Destroy cities and units at this location
+        for agent in self.agents:
+            # Check and destroy cities
+            cities_to_remove = [city for city in self.cities[agent] if city.x == x and city.y == y]
+            for city in cities_to_remove:
+                self.cities[agent].remove(city)
+                city_channel = self.num_of_agents + (3 * self.agents.index(agent))
+                self.map[y, x, city_channel] = 0
+
+            # Check and destroy units
+            units_to_remove = [unit for unit in self.units[agent] if unit.x == x and unit.y == y]
+            for unit in units_to_remove:
+                self.units[agent].remove(unit)
+                unit_channel = self.num_of_agents + (3 * self.agents.index(agent)) + (1 if unit.type == 'warrior' else 2)
+                self.map[y, x, unit_channel] = 0
+
 # Testing 
+# if __name__ == "__main__":
+#     map_size = (50, 100) 
+#     num_agents = 4        
+#     env = Civilization(map_size, num_agents)
+#     env.reset()
+#     running = True
+#     while running:
+#         env.render()
+#         for event in pygame.event.get():
+#             if event.type == QUIT:
+#                 running = False
+#     pygame.quit()
+
 if __name__ == "__main__":
-    map_size = (50, 100) 
-    num_agents = 4        
-    env = Civilization(map_size, num_agents)
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from eco_civ_menu import inputs, Civilization
+
+    # Dynamically determine map size based on screen resolution
+    import pygame
+    pygame.init()
+    screen_info = pygame.display.Info()
+    screen_width = screen_info.current_w
+    screen_height = screen_info.current_h
+    target_tile_size = 20
+    map_width = screen_width // target_tile_size
+    map_height = screen_height // target_tile_size
+
+    # Collect parameters from the GUI menu
+    params = {
+        key: float(val["value"]) if "." in val["value"] else int(val["value"])
+        for key, val in inputs.items()
+    }
+
+    print("Launching game with:", params)
+
+    env = Civilization(
+        map_size=(map_height, map_width),
+        num_agents=params["# Agents"],
+        visibility_range=params["Visibility"],
+        max_projects=params["Max Projects"],
+        render_mode="human"
+    )
+    env.k1 = params["Reward k1"]
+    env.gamma = params["Penalty gamma"]
+
     env.reset()
     running = True
-    while running:
+    while running and env.agents:
         env.render()
+        current_agent = env.agent_selection
+        action = env.action_space(current_agent).sample() if not env.terminations[current_agent] else None
+        env.step(action)
         for event in pygame.event.get():
-            if event.type == QUIT:
+            if event.type == pygame.QUIT:
                 running = False
-    #pygame.quit()   
+    pygame.quit()
+
