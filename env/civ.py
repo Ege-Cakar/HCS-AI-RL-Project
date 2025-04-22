@@ -1,6 +1,4 @@
 import numpy as np
-import pettingzoo as pz
-import gymnasium as gym
 from gymnasium import spaces
 from pettingzoo.utils import agent_selector
 from pettingzoo.utils.env import AECEnv
@@ -278,7 +276,7 @@ class Civilization(AECEnv):
             "offer_unit_id": spaces.Discrete(max_units_per_agent + 1),  # +1 for "no unit"
             "request_unit_id": spaces.Discrete(max_units_per_agent + 1),  # +1 for "no unit"
             "invade_x": spaces.Discrete(map_size[1]),  # X coordinate to invade
-            "invade_y": spaces.Discrete(map_size[0])   # Y coordinate to invade
+            "invade_y": spaces.Discrete(map_size[0]),   # Y coordinate to invade
             "target_government": spaces.Discrete(4)  # Only if changing government
         }) for agent in self.agents}
         
@@ -1088,11 +1086,11 @@ class Civilization(AECEnv):
             # Check all unit channels for all agents
             for agent_idx in range(self.env.num_of_agents):
                 unit_base_idx = self.env.num_of_agents + (3 * agent_idx)
-				# Channels for 'city', 'warrior', 'settler'
-				unit_channels = [unit_base_idx + i for i in range(3)]
-				if np.any(self.env.map[y, x, unit_channels] > 0]:
-					return False
-				return True
+                # Channels for 'city', 'warrior', 'settler'
+                unit_channels = [unit_base_idx + i for i in range(3)]
+                if np.any(self.env.map[y, x, unit_channels] > 0):
+                    return False
+            return True
         
         def _check_enemy_units_and_cities(self, x, y, direction, agent, env): 
             """
@@ -2476,13 +2474,13 @@ if __name__ == "__main__":
 
     env = Civilization(
         map_size=(map_height, map_width),
-        num_agents=params["# Agents"],
-        visibility_range=params["Visibility"],
-        max_projects=params["Max Projects"],
+        num_agents=params["num_agents"],
+        visibility_range=params["visibility"],
+        max_projects=params["max_projects"],
         render_mode="human"
     )
-    env.k1 = params["Reward k1"]
-    env.gamma = params["Penalty gamma"]
+    env.k1 = params["k1"]
+    env.gamma = params["penalty_gamma"]
 
     env.reset()
     running = True
@@ -2495,4 +2493,3 @@ if __name__ == "__main__":
             if event.type == pygame.QUIT:
                 running = False
     pygame.quit()
-
