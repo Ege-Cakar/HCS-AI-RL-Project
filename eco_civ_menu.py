@@ -1,6 +1,7 @@
 import pygame
 import sys
 from env.civ import Civilization
+from performance_graph import generate_performance_graph
 
 pygame.init()
 
@@ -74,7 +75,7 @@ while True:
                 }
 
                 # Dynamically determine map size based on screen resolution
-                target_tile_size = 20
+                target_tile_size = 35
                 map_width = screen_width // target_tile_size
                 map_height = screen_height // target_tile_size
 
@@ -93,14 +94,27 @@ while True:
 
                 env.reset()
                 running = True
+                # Initialize money history tracking
+                money_history = {agent: [] for agent in env.agents}
+                
                 while running and env.agents:
                     env.render()
                     current_agent = env.agent_selection
                     action = env.action_space(current_agent).sample() if not env.terminations[current_agent] else None
                     env.step(action)
+                    
+                    # Record money for each agent after each step
+                    for agent in env.agents:
+                        if agent in money_history:  # Check if agent still exists
+                            money_history[agent].append(env.money[agent])
+                    
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             running = False
+                
+                # Display performance graph at the end
+                pygame.quit()
+                generate_performance_graph(env.agents, money_history)
                 sys.exit()
 
         if event.type == pygame.KEYDOWN:
